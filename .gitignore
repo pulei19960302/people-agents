@@ -1,0 +1,26 @@
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# IDE and operating-system files
+.idea/
+.DS_Store
+.claude/*.local.*
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Node.js
+node_modules/
+.next/
+
+# Local runtime files
+*.log
+uploads/
+/api/config.yaml

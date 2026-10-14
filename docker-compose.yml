@@ -1,0 +1,154 @@
+services:
+  # ==================== 基础设施 ====================
+
+  people-agent-redis:
+    image: ${DOCKER_IMAGE_REGISTRY:-docker.1ms.run/library}/redis:7-alpine
+    container_name: people-agent-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - people-agent-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  people-agent-postgres:
+    image: ${DOCKER_IMAGE_REGISTRY:-docker.1ms.run/library}/postgres:16-alpine
+    container_name: people-agent-postgres
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-people_agent}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - people-agent-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-people_agent}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==================== 沙箱服务 ====================
+
+  people-agent-sandbox:
+    build:
+      context: ./sandbox
+      dockerfile: Dockerfile
+      args:
+        DOCKER_IMAGE_REGISTRY: ${DOCKER_IMAGE_REGISTRY:-docker.1ms.run/library}
+    image: people-agent-sandbox
+    container_name: people-agent-sandbox
+    restart: "no"
+    networks:
+      - people-agent-network
+
+  # ==================== 后端 API ====================
+
+  people-agent-api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+      args:
+        DOCKER_IMAGE_REGISTRY: ${DOCKER_IMAGE_REGISTRY:-docker.1ms.run/library}
+    image: people-agent-api
+    container_name: people-agent-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Docker 网络内使用服务名，覆盖 .env 里的 localhost
+      SQLALCHEMY_DATABASE_URI: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@people-agent-postgres:5432/${POSTGRES_DB:-people_agent}
+      REDIS_HOST: people-agent-redis
+      REDIS_PORT: 6379
+      # API 监听所有接口
+      HOST: 0.0.0.0
+      PORT: 8000
+    # 如需动态创建沙箱容器，取消以下注释以挂载 Docker Socket
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      people-agent-redis:
+        condition: service_healthy
+      people-agent-postgres:
+        condition: service_healthy
+    networks:
+      - people-agent-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/api/status"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # ==================== 前端 UI ====================
+
+  people-agent-ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+      args:
+        DOCKER_IMAGE_REGISTRY: ${DOCKER_IMAGE_REGISTRY:-docker.1ms.run/library}
+        NEXT_PUBLIC_API_BASE_URL: /api
+    image: people-agent-ui
+    container_name: people-agent-ui
+    restart: unless-stopped
+    depends_on:
+      people-agent-api:
+        condition: service_healthy
+    networks:
+      - people-agent-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ==================== Nginx 网关 ====================
+
+  people-agent-nginx:
+    image: ${DOCKER_IMAGE_REGISTRY:-docker.1ms.run/library}/nginx:1.27-alpine
+    container_name: people-agent-nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT:-8090}:80"
+      # 如需启用 HTTPS，取消以下注释
+      # - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      # SSL 证书挂载（如需启用 HTTPS，取消以下注释）
+      # - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      people-agent-ui:
+        condition: service_healthy
+      people-agent-api:
+        condition: service_healthy
+    networks:
+      - people-agent-network
+
+# ==================== 数据卷 ====================
+volumes:
+  redis_data:
+    driver: local
+  postgres_data:
+    driver: local
+
+# ==================== 网络 ====================
+networks:
+  people-agent-network:
+    name: people-agent-network
+    driver: bridge
