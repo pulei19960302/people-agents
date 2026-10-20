@@ -7,7 +7,6 @@ from sqlalchemy import select, delete, update, func, cast, exists
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.models.event import BaseEvent
 from app.domain.models.file import File
 from app.domain.models.memory import Memory
 from app.domain.models.session import Session, SessionStatus
@@ -103,25 +102,6 @@ class DBSessionRepository(SessionRepository):
         result = await self.db_session.execute(stmt)
 
         # 2.检查是否更新成功
-        if result.rowcount == 0:
-            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
-
-    async def add_event(self, session_id: str, event: BaseEvent) -> None:
-        """往会话中新增事件"""
-        # 1.将event序列化为json
-        event_data = event.model_dump(mode="json")
-
-        # 2.构建原子更新语句并执行
-        stmt = (
-            update(SessionModel)
-            .where(SessionModel.id == session_id)
-            .values(
-                events=func.coalesce(SessionModel.events, cast([], JSONB)) + cast([event_data], JSONB),
-            )
-        )
-        result = await self.db_session.execute(stmt)
-
-        # 3.检查是否新增成功
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
 

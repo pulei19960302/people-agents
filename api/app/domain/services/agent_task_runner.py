@@ -80,12 +80,15 @@ class AgentTaskRunner(TaskRunner):
 
     async def _put_and_add_event(self, task: Task, event: Event) -> None:
         """将事件写入Redis Stream并持久化到session_events表。"""
-        # 1.发送到Redis Stream。
+        # 1.关联本次Agent运行，保证实时事件和历史事件具有相同的run_id。
+        event.run_id = task.id
+
+        # 2.发送到Redis Stream。
         # Redis返回的是Stream游标，不要覆盖业务事件event.id。
         stream_id = await task.output_stream.put(event.model_dump_json())
-        # 2.转换为数据库会话事件。
+        # 3.转换为数据库会话事件。
         session_event = SessionEvent.from_event(session_id=self._session_id, event=event, run_id=task.id)
-        # 3.每次数据库操作创建独立UoW。
+        # 4.每次数据库操作创建独立UoW。
         uow = self._uow_factory()
 
         async with uow:

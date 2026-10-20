@@ -168,20 +168,13 @@ class AgentService:
                         logger.error(f"会话[{session_id}]创建任务失败")
                         raise RuntimeError(f"会话[{session_id}]创建任务失败")
 
-                # 6.传递了消息则更新会话中的最后一条消息
-                async with self._uow:
-                    await self._uow.session.update_latest_message(
-                        session_id=session_id,
-                        message=message,
-                        timestamp=timestamp or datetime.now(),
-                    )
-
                 # bugfix:从文件数据库中查询数据并更新attachments实际内容, 并返回人类消息事件
                 async with self._uow:
                     db_attachments = [await self._uow.file.get_by_id(id) for id in attachments]
 
                 # 7.创建一个人类消息事件
                 message_event = MessageEvent(
+                    run_id=task.id,
                     role="user",
                     message=message,
                     attachments=[attachment for attachment in db_attachments if attachment is not None],
@@ -199,7 +192,7 @@ class AgentService:
                     message_event.id,
                     stream_id,
                 )
-                yield message_event
+
 
                 # 将人类消息存在session_event 里面
                 session_event = SessionEvent.from_event(
@@ -209,15 +202,23 @@ class AgentService:
                 )
 
                 async with self._uow:
-                    # 保存到session 表
-                    await self._uow.session.add_event(session_id, message_event)
 
                     # 保存到session event 表
                     await self._uow.session_event.add(session_event)
 
+                    await self._uow.session.update_latest_message(
+                        session_id=session_id,
+                        message=message,
+                        timestamp=timestamp or datetime.now(),
+                    )
+
                 # 9.执行任务
                 await task.invoke()
+
                 logger.info(f"往会话[{session_id}]输入消息队列写入消息: {message[:50]}...")
+
+                # 返回给前端
+                yield message_event
 
             # 10.记录日志展示会话已启动
             logger.info(f"会话[{session_id}]已启动")
@@ -262,7 +263,13 @@ class AgentService:
             event = ErrorEvent(error=str(e))
             try:
                 async with self._uow:
-                    await self._uow.session.add_event(session_id, event)
+                    # 将sse的event 转成sessionevent
+                    error_session_event = SessionEvent.from_event(
+                        session_id=session_id,
+                        event=event,
+                        run_id=task.id
+                    )
+                    await self._uow.session_event.add(error_session_event)
             except (asyncio.CancelledError, Exception) as add_err:
                 logger.warning(f"会话[{session_id}]添加错误事件失败(可能是客户端断开连接): {add_err}")
             yield event

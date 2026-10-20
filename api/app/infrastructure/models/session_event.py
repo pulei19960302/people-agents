@@ -2,8 +2,8 @@ from datetime import datetime
 
 import uuid
 
-from sqlalchemy import String, ForeignKey, text, DateTime, PrimaryKeyConstraint, Index
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
+from sqlalchemy import String, ForeignKey, text, DateTime, PrimaryKeyConstraint, Index, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from typing import Optional, Any, Dict
 
@@ -16,18 +16,17 @@ class SessionEventModel(Base):
     __tablename__ = "session_events"
 
     id: Mapped[str] = mapped_column(
-        PG_UUID(as_uuid=True),
+        String(255),
         nullable=False,
         primary_key=True,
-        default=lambda: str(uuid.uuid4())
+        default=lambda: str(uuid.uuid4()),
     )
 
 
     event_id: Mapped[str] = mapped_column(
-        PG_UUID(as_uuid=True),
+        String(255),
         nullable=False,
         primary_key=False,
-        unique=True,
         default=lambda: str(uuid.uuid4())
     )
 
@@ -77,26 +76,22 @@ class SessionEventModel(Base):
 
 
     __table_args__ = (
-        PrimaryKeyConstraint("id", name="pk_session_events_id"),
-
-        Index(
-            "ix_session_events_session_created_at",
-            "session_id",
-            "created_at"
+        PrimaryKeyConstraint(
+            "id",
+            name="pk_session_events_id",
+        ),
+        UniqueConstraint(
+            "event_id",
+            name="uq_session_events_event_id",
         ),
         Index(
-            "ix_session_events_session_run_id_id",
+            "ix_session_events_session_run_created_at_id",
             "session_id",
             "run_id",
+            "created_at",
             "id",
             postgresql_where=text("run_id IS NOT NULL"),
-        ),
-        Index(
-            "ix_session_events_session_tool_call_id",
-            "session_id",
-            "tool_call_id",
-            postgresql_where=text("tool_call_id IS NOT NULL"),
-        ),
+        )
     )
 
 

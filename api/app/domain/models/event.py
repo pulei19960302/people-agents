@@ -36,6 +36,7 @@ class ToolEventStatus(str, Enum):
 class BaseEvent(BaseModel):
     """基础事件类型"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))  # 事件id
+    run_id: Optional[str] = None  # 所属的一次Agent任务运行ID
     type: Literal[""] = ""  # 事件的类型
     created_at: datetime = Field(default_factory=datetime.now)  # 事件创建时间
 

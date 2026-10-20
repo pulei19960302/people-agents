@@ -17,3 +17,20 @@ class SessionEventRepository(Protocol):
 
     async def get_by_event_id(self, event_id: str) -> SessionEvent | None:
         ...
+
+    async def get_last_plan(self, session_id: str) -> SessionEvent | None:
+        ...
+
+    async def get_run_page_by_session_id(
+            self,
+            session_id: str,
+            run_limit: int,
+            before_started_at: datetime | None = None,
+            before_run_id: str | None = None,
+    ) -> tuple[
+        list[SessionEvent],
+        bool,
+        datetime | None,
+        str | None
+    ]:
+        ...

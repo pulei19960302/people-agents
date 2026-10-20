@@ -49,6 +49,7 @@ class RedisStreamTask(Task):
         # 2.清除当前任务对应的资源
         self._cleanup_registry()
 
+    # 异步任务
     async def _execute_task(self) -> None:
         """使用TaskRunner执行任务"""
         try:
@@ -71,7 +72,7 @@ class RedisStreamTask(Task):
         """取消当前执行的任务"""
         if not self.done:
             # 1.取消任务
-            self._execution_task.cancel()
+            self._execute_task_execution_task.cancel()
             logger.info(f"任务[{self._id}]已取消")
 
             # 2.清除注册的当前任务

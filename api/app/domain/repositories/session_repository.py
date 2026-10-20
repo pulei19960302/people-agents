@@ -56,10 +56,6 @@ class SessionRepository(Protocol):
         """根据传递的会话id更新会话状态"""
         ...
 
-    async def add_event(self, session_id: str, event: BaseEvent) -> None:
-        """往会话中新增事件"""
-        ...
-
     async def add_file(self, session_id: str, file: File) -> None:
         """往会话中新增文件"""
         ...

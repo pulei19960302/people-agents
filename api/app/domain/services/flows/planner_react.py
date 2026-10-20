@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import logging
-from typing import AsyncGenerator, Optional, Callable
+from typing import AsyncGenerator, Optional, Callable, cast
 
 from app.domain.external.browser import Browser
 from app.domain.external.json_parser import JSONParser
@@ -24,6 +24,7 @@ from app.domain.services.tools.message import MessageTool
 from app.domain.services.tools.search import SearchTool
 from app.domain.services.tools.shell import ShellTool
 from .base import BaseFlow, FlowStatus
+from ...models.session_event import SessionEvent
 from ...repositories.uow import IUnitOfWork
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,18 @@ class PlannerReActFlow(BaseFlow):
 
         # 4.如果会话状态等于等待人类输入，则需要修改流的状态为执行中
         if session.status == SessionStatus.WAITING:
+
+            session_plan = await self._uow.session_event.get_last_plan(session.id)
+
+            if session_plan is None:
+                raise RuntimeError("会话处于等待状态，但没有找到可恢复的计划")
+
+            event = session_plan.to_event()
+            if not isinstance(event, PlanEvent):
+                raise TypeError("最新计划记录无法恢复为 PlanEvent")
+
+            self.plan = event.plan
+
             logger.debug(f"会话[{self._session_id}]处于等待状态并传递了新消息")
             self.status = FlowStatus.EXECUTING
 
@@ -118,88 +131,86 @@ class PlannerReActFlow(BaseFlow):
         async with self._uow:
             await self._uow.session.update_status(self._session_id, SessionStatus.RUNNING)
 
-        # 6.获取当前会话中最新事件
-        self.plan = session.get_latest_plan()
         logger.info(f"Planner&ReAct流接收消息: {message.message[:50]}...")
 
-        # 7.定义当前正在执行的子步骤
+        # 6.定义当前正在执行的子步骤
         step = None
 
-        # 8.创建死循环执行任务，根据流的不同状态执行不同的操作
+        # 7.创建死循环执行任务，根据流的不同状态执行不同的操作
         while True:
-            # 9.如果流的状态为空闲，则只需要将状态修改为规划中
+            # 8.如果流的状态为空闲，则只需要将状态修改为规划中
             if self.status == FlowStatus.IDLE:
                 logger.info(f"Planner&ReAct流状态从{FlowStatus.IDLE}变成{FlowStatus.PLANNING}")
                 self.status = FlowStatus.PLANNING
             elif self.status == FlowStatus.PLANNING:
-                # 10.流状态为规划中，则调用规划Agent
+                # 9.流状态为规划中，则调用规划Agent
                 logger.info(f"Planner&ReAct流开始创建计划/Plan")
                 async for event in self.planner.create_plan(message):
-                    # 11.判断规划Agent是否返回规划事件
+                    # 10.判断规划Agent是否返回规划事件
                     if isinstance(event, PlanEvent) and event.status == PlanEventStatus.CREATED:
-                        # 12.创建计划成功时需要更新计划
+                        # 11 .创建计划成功时需要更新计划
                         self.plan = event.plan
                         logger.info(f"Planner&ReAct流成功创建计划, 共计: {len(event.plan.steps)} 步")
 
-                        # 13.在计划中同步生成了会话标题+初始AI消息
+                        # 12.在计划中同步生成了会话标题+初始AI消息
                         yield TitleEvent(title=event.plan.title)
                         yield MessageEvent(role="assistant", message=event.plan.message)
 
-                    # 14.将生成的事件直接输出(一般来说是PlanEvent)
+                    # 13.将生成的事件直接输出(一般来说是PlanEvent)
                     yield event
 
-                # 15.计划创建完成，更新流状态为执行中
+                # 14.计划创建完成，更新流状态为执行中
                 logger.info(f"Planner&ReAct流状态从{FlowStatus.PLANNING}变成{FlowStatus.EXECUTING}")
                 self.status = FlowStatus.EXECUTING
 
-                # 16.判断计划是否生成，步骤是否正常
+                # 15.判断计划是否生成，步骤是否正常
                 if not self.plan or len(self.plan.steps) == 0:
                     logger.info(f"Planner&ReAct流创建计划失败或无子步骤")
                     self.status = FlowStatus.COMPLETED
             elif self.status == FlowStatus.EXECUTING:
-                # 17.流的状态为执行中，先将计划状态调整为运行中，同时调用执行Agent完成每个子步骤
+                # 16.流的状态为执行中，先将计划状态调整为运行中，同时调用执行Agent完成每个子步骤
                 self.plan.status = ExecutionStatus.RUNNING
 
-                # 18.获取当前计划的下一个需要执行的子步骤
+                # 17.获取当前计划的下一个需要执行的子步骤
                 step = self.plan.get_next_step()
 
-                # 19.如果不存在下一个需要执行的自己花，则更新流状态并执行后续步骤
+                # 18.如果不存在下一个需要执行的自己花，则更新流状态并执行后续步骤
                 if not step:
                     logger.info(f"Planner&ReAct流状态从{FlowStatus.EXECUTING}变成{FlowStatus.SUMMARIZING}")
                     self.status = FlowStatus.SUMMARIZING
                     continue
 
-                # 20.调用执行Agent执行对应的步骤
+                # 19.调用执行Agent执行对应的步骤
                 logger.info(f"Planner&ReAct流开始执行步骤 {step.id}: {step.description[:50]}...")
                 async for event in self.react.execute_step(self.plan, step, message):
                     yield event
 
-                # 21.压缩执行Agent记忆，避免上下文腐化+消耗大量token
+                # 20.压缩执行Agent记忆，避免上下文腐化+消耗大量token
                 logger.info(f"压缩{self.react.name} Agent记忆/上下文")
                 await self.react.compact_memory()
 
-                # 22.将状态更新为updating
+                # 21.将状态更新为updating
                 self.status = FlowStatus.UPDATING
             elif self.status == FlowStatus.UPDATING:
-                # 23.流状态为更新表示需要更新计划
+                # 22.流状态为更新表示需要更新计划
                 logger.info(f"Planner&ReAct流开始更新计划")
                 async for event in self.planner.update_plan(self.plan, step):
                     yield event
 
-                # 24.计划更新完成，需要执行相应的子步骤
+                # 23.计划更新完成，需要执行相应的子步骤
                 logger.info(f"Planner&ReAct流状态从{FlowStatus.UPDATING}变成{FlowStatus.EXECUTING}")
                 self.status = FlowStatus.EXECUTING
             elif self.status == FlowStatus.SUMMARIZING:
-                # 25.流状态为总结中，则意味着所有子步骤都执行完成
+                # 24.流状态为总结中，则意味着所有子步骤都执行完成
                 logger.info(f"Planner&ReAct流开始总结")
                 async for event in self.react.summarize():
                     yield event
 
-                # 26.总结完毕，意味着流即将结束
+                # 25.总结完毕，意味着流即将结束
                 logger.info(f"Planner&ReAct流状态从{FlowStatus.SUMMARIZING}变成{FlowStatus.COMPLETED}")
                 self.status = FlowStatus.COMPLETED
             elif self.status == FlowStatus.COMPLETED:
-                # 27.计划状态已完成则更新plan状态，并发送计划事件通知API已完成
+                # 26.计划状态已完成则更新plan状态，并发送计划事件通知API已完成
                 self.plan.status = ExecutionStatus.COMPLETED
                 self.status = FlowStatus.IDLE
                 yield PlanEvent(status=PlanEventStatus.COMPLETED, plan=self.plan)

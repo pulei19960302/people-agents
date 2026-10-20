@@ -176,7 +176,13 @@ export type CreateSessionParams = {
 /**
  * 聊天消息
  */
-export type ChatMessage = {
+export type BaseSSEEventData = {
+  event_id?: string;
+  run_id?: string;
+  created_at?: number | string;
+};
+
+export type ChatMessage = BaseSSEEventData & {
   role: "user" | "assistant" | "system";
   message: string;
   attachments?: Array<{
@@ -198,13 +204,6 @@ export type ChatParams = {
 };
 
 /**
- * 会话详情（含事件列表，与 chat 流式响应格式一致）
- */
-export type SessionDetail = Session & {
-  events?: SSEEventData[];
-};
-
-/**
  * 计划步骤
  */
 export type PlanStep = {
@@ -217,7 +216,7 @@ export type PlanStep = {
 /**
  * 计划事件
  */
-export type PlanEvent = {
+export type PlanEvent = BaseSSEEventData & {
   steps: PlanStep[];
   [key: string]: unknown;
 };
@@ -225,7 +224,7 @@ export type PlanEvent = {
 /**
  * 步骤事件
  */
-export type StepEvent = {
+export type StepEvent = BaseSSEEventData & {
   id: string;
   status: ExecutionStatus;
   description: string;
@@ -235,7 +234,8 @@ export type StepEvent = {
 /**
  * 工具调用事件
  */
-export type ToolEvent = {
+export type ToolEvent = BaseSSEEventData & {
+  tool_call_id?: string;
   name: string;
   function: string;
   args: Record<string, unknown>;
@@ -258,17 +258,23 @@ export type SSEEventType =
   | "error";
 
 /**
- * SSE 事件数据
+ * SSE 事件流数据
  */
 export type SSEEventData =
   | { type: "message"; data: ChatMessage }
-  | { type: "title"; data: { title: string } }
+  | { type: "title"; data: BaseSSEEventData & { title: string } }
   | { type: "plan"; data: PlanEvent }
   | { type: "step"; data: StepEvent }
   | { type: "tool"; data: ToolEvent }
-  | { type: "wait"; data: Record<string, unknown> }
-  | { type: "done"; data: Record<string, unknown> }
-  | { type: "error"; data: { error: string } };
+  | { type: "wait"; data: BaseSSEEventData & Record<string, unknown> }
+  | { type: "done"; data: BaseSSEEventData & Record<string, unknown> }
+  | { type: "error"; data: BaseSSEEventData & { error: string } };
+
+export type SSEEventDataWithTimeline = {
+  events: SSEEventData[];
+  has_more: boolean;
+  next_cursor: string | null;
+};
 
 /**
  * SSE 事件处理器
@@ -304,4 +310,3 @@ export type ViewShellParams = {
   shell_session_id: string;
   [key: string]: unknown;
 };
-

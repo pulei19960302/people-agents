@@ -1,8 +1,8 @@
 import { get, post, createSSEStream, parseSSEStream } from "./fetch";
 import type {
   Session,
-  SessionDetail,
   SessionsData,
+  SSEEventDataWithTimeline,
   CreateSessionParams,
   ChatParams,
   SessionFile,
@@ -16,6 +16,16 @@ import type {
  * 会话列表流式更新回调
  */
 type SessionsStreamCallback = (sessions: Session[]) => void;
+
+type SessionEventTimelineParams = {
+  limit?: number;
+  before?: string;
+};
+
+const timelineRequests = new Map<
+  string,
+  Promise<SSEEventDataWithTimeline>
+>();
 
 /**
  * 会话模块 API
@@ -114,12 +124,36 @@ export const sessionApi = {
     return get<Session>(`/sessions/${sessionId}`);
   },
 
-  /**
-   * 获取会话详情（含事件列表，与 chat 流式响应格式一致）
-   * 若后端在 GET /sessions/:id 中返回 events 字段则一并返回
-   */
-  getSessionDetail: (sessionId: string): Promise<SessionDetail> => {
-    return get<SessionDetail>(`/sessions/${sessionId}`);
+  getSessionEventTimeline: (
+    sessionId: string,
+    params: SessionEventTimelineParams = {},
+  ): Promise<SSEEventDataWithTimeline> => {
+    const limit = params.limit ?? 5;
+    const requestKey = JSON.stringify([
+      sessionId,
+      limit,
+      params.before ?? null,
+    ]);
+    const pendingRequest = timelineRequests.get(requestKey);
+    if (pendingRequest) return pendingRequest;
+
+    const request = get<SSEEventDataWithTimeline>(
+      `/sessions/${sessionId}/events/timeline`,
+      {
+        limit,
+        ...(params.before ? { before: params.before } : {}),
+      },
+    );
+
+    timelineRequests.set(requestKey, request);
+    const cleanupRequest = () => {
+      if (timelineRequests.get(requestKey) === request) {
+        timelineRequests.delete(requestKey);
+      }
+    };
+    void request.then(cleanupRequest, cleanupRequest);
+
+    return request;
   },
 
   /**

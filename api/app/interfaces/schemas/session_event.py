@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+from app.interfaces.schemas.event import AgentSSEEvent
 
 
 EventType = Literal[
@@ -51,5 +52,12 @@ class ListSessionEventsResponse(BaseModel):
     """分页查询会话事件响应。"""
 
     events: list[SessionEventResponse] = Field(default_factory=list)
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
+
+class ListSessionEventTimelineResponse(BaseModel):
+    events: list[AgentSSEEvent] = Field(default_factory=list)
     next_cursor: str | None = None
     has_more: bool = False

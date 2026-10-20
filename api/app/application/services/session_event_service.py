@@ -31,12 +31,14 @@ class SessionEventService:
 
     @staticmethod
     def _encode_cursor(
-        created_at: datetime,
+        run_started_at: datetime,
+        run_id: str
     ) -> str:
         """将事件排序字段编码成不透明游标。"""
 
         cursor_data = {
-            "created_at": created_at.isoformat(),
+            "run_started_at": run_started_at.isoformat(),
+            "run_id": run_id,
         }
 
         cursor_json = json.dumps(
@@ -52,7 +54,7 @@ class SessionEventService:
     @staticmethod
     def _decode_cursor(
             cursor: str,
-    ) -> datetime:
+    ) -> tuple[datetime, str]:
         """解析分页游标。"""
 
         try:
@@ -62,11 +64,11 @@ class SessionEventService:
 
             cursor_data = json.loads(cursor_json)
 
-            created_at = datetime.fromisoformat(
-                cursor_data["created_at"]
+            return (
+                datetime.fromisoformat(cursor_data["run_started_at"]),
+                str(cursor_data["run_id"]),
             )
 
-            return created_at
 
         except (
                 ValueError,
@@ -85,7 +87,7 @@ class SessionEventService:
         session_event = SessionEvent(
             event_id=event.id,
             session_id=session_id,
-            run_id=run_id,
+            run_id=run_id if run_id is not None else event.run_id,
             event_type=event.type,
             tool_call_id=(
                 event.tool_call_id
@@ -96,6 +98,7 @@ class SessionEventService:
                 mode="json",
                 exclude={
                     "id",
+                    "run_id",
                     "type",
                     "created_at",
                 },
@@ -126,28 +129,28 @@ class SessionEventService:
     async def get_page_by_session_id(
             self,
             session_id: str,
-            limit: int,
+            run_limit: int,
             before: str | None = None,
     ) -> SessionEventPage:
-        """分页查询会话事件。
 
-                第一次查询不传before，返回最新的limit条事件。
-                加载更早事件时，传递上一次返回的next_cursor。
-                """
-
-        if limit < 1 or limit > 100:
-            raise BadRequestError("limit必须在1到100之间")
-
-        before_created_at: datetime | None = None
-
-        if before:
-            before_created_at = self._decode_cursor(
-                before
+        if run_limit < 1 or run_limit > 10:
+            raise BadRequestError(
+                "run_limit必须在1到10之间"
             )
 
+
+        before_started_at: datetime | None = None
+        before_run_id: str | None = None
+
+        if before:
+            before_started_at, before_run_id = self._decode_cursor(before)
+
+
+
         async with self._uow_factory() as uow:
-            session_exists = await uow.session.get_session_exists(
-                session_id
+            # 5.检查目标会话是否存在。
+            session_exists = (
+                await uow.session.get_session_exists(session_id)
             )
 
             if not session_exists:
@@ -155,33 +158,48 @@ class SessionEventService:
                     f"会话[{session_id}]不存在，无法查询事件"
                 )
 
-            events, has_more = (
-                await uow.session_event.get_by_session_id(
+            # 查询run_limit个完整运行的全部事件。
+            #
+            # Repository负责：
+            # - 查询当前页有哪些run_id；
+            # - 查询这些run_id的全部事件；
+            # - 判断是否还有更早的run；
+            # - 返回本页最老run的分页边界。
+            (
+                events,
+                has_more,
+                oldest_run_started_at,
+                oldest_run_id,
+            ) = await (
+                uow.session_event.get_run_page_by_session_id(
                     session_id=session_id,
-                    limit=limit,
-                    before_created_at=before_created_at,
+                    run_limit=run_limit,
+                    before_started_at=before_started_at,
+                    before_run_id=before_run_id,
                 )
             )
 
+        # 7.默认没有下一页游标。
         next_cursor: str | None = None
 
-        # Repository返回的events已经是“旧 -> 新”。
-        # events[0]是本页最早的记录，下一页需要查询它之前的数据。
-        if events and has_more:
-            oldest_event = events[0]
+        # 8.存在更早的运行时，使用本页最老run生成下一页游标。
+        if has_more:
+            if (
+                oldest_run_started_at is None
+                or oldest_run_id is None
+            ):
+                # 这是Repository返回结果违反约定，属于服务端错误，
+                # 不能向客户端返回一个无法继续分页的结果。
+                raise RuntimeError(
+                    "会话事件仓库未返回运行分页边界"
+                )
 
             next_cursor = self._encode_cursor(
-                created_at=oldest_event.created_at,
+                run_started_at=oldest_run_started_at,
+                run_id=oldest_run_id,
             )
 
-        logger.debug(
-            "查询会话事件分页成功: "
-            "session_id=%s, count=%s, has_more=%s",
-            session_id,
-            len(events),
-            has_more,
-        )
-
+        # 9.返回应用层分页结果。
         return SessionEventPage(
             events=events,
             next_cursor=next_cursor,

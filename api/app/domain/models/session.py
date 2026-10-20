@@ -30,19 +30,8 @@ class Session(BaseModel):
     unread_message_count: int = 0  # 未读消息数
     latest_message: str = ""  # 最新消息
     latest_message_at: Optional[datetime] = None  # 最新消息时间
-    events: List[Event] = Field(default_factory=list)  # 事件列表
     files: List[File] = Field(default_factory=list)  # 文件列表
     memories: Dict[str, Memory] = Field(default_factory=dict)  # 记忆
     status: SessionStatus = SessionStatus.PENDING  # 状态
     updated_at: datetime = Field(default_factory=datetime.now)  # 更新时间
     created_at: datetime = Field(default_factory=datetime.now)  # 创建时间
-
-    def get_latest_plan(self) -> Optional[Plan]:
-        """获取会话中的最新计划"""
-        # 1.倒序遍历会话中所有事件消息
-        for event in reversed(self.events):
-            # 2.判断事件的类型是否为PlanEvent，如果是则提取计划后返回
-            if isinstance(event, PlanEvent):
-                return event.plan
-
-        return None

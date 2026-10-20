@@ -34,7 +34,6 @@ export type {
   FileInfo,
   FileUploadParams,
   Session,
-  SessionDetail,
   SessionsData,
   CreateSessionParams,
   ChatMessage,
@@ -55,4 +54,3 @@ export type {
 export { configApi } from "./config";
 export { fileApi } from "./file";
 export { sessionApi } from "./session";
-

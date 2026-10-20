@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field
 
 from app.domain.models.file import File
 from app.domain.models.session import SessionStatus
-from app.interfaces.schemas.event import AgentSSEEvent
 
 
 class CreateSessionResponse(BaseModel):

@@ -25,7 +25,7 @@ from app.interfaces.schemas.session import (
     ChatRequest,
     GetSessionResponse, GetSessionFilesResponse, FileReadResponse, FileReadRequest, ShellReadResponse, ShellReadRequest,
 )
-from app.interfaces.schemas.session_event import ListSessionEventsResponse, SessionEventResponse
+from app.interfaces.schemas.session_event import ListSessionEventsResponse, SessionEventResponse, ListSessionEventTimelineResponse
 from app.interfaces.service_dependencies import get_session_service, get_agent_service, get_session_event_service
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ router = APIRouter(prefix="/sessions", tags=["会话模块"])
 # 流式获取会话详情睡眠间隔
 SESSION_SLEEP_INTERVAL = 5
 
-EventLimit = Annotated[int, Query(ge=1, le=100)]
+EventLimit = Annotated[int, Query(ge=1, le=10)]
 
 """
 POST /{session_id}/chat
@@ -189,6 +189,7 @@ async def chat(
 
     async def event_generator() -> AsyncGenerator[ServerSentEvent, None]:
         """定义事件生成器，用于配合EventSourceResponse生成流式响应数据"""
+
         # 1.调用Agent服务发起聊天
         async for event in agent_service.chat(
                 session_id=session_id,
@@ -233,37 +234,38 @@ async def get_session(
 
 
 @router.get(
-    path="/{session_id}/events",
-    response_model=Response[ListSessionEventsResponse],
-    summary="获取指定会话事件详情",
-    description="根据传递的会话id获取该会话的事件详情",
+    path="/{session_id}/events/timeline",
+    response_model=Response[ListSessionEventTimelineResponse],
+    summary="获取指定会话事件sse详情",
+    description="根据传递的会话id获取该会话的事件sse详情",
 )
-async def get_session_event(
+async def get_session_event_timeline(
         session_id: str,
-        limit: EventLimit = 30,
+        limit: EventLimit = 5,
         before: str | None = None,
         session_event_service: SessionEventService = Depends(get_session_event_service)
-) -> Response[ListSessionEventsResponse]:
+) -> Response[ListSessionEventTimelineResponse]:
 
 
     page = await session_event_service.get_page_by_session_id(
         session_id=session_id,
-        limit=limit,
+        run_limit=limit,
         before=before,
     )
 
     return Response.success(
         msg="获取会话事件成功",
-        data=ListSessionEventsResponse(
+        data=ListSessionEventTimelineResponse(
             events=[
-                SessionEventResponse.model_validate(event)
+                EventMapper.event_to_sse_event(
+                    event.to_event()
+                )
                 for event in page.events
             ],
             next_cursor=page.next_cursor,
             has_more=page.has_more,
         ),
     )
-
 
 
 @router.post(

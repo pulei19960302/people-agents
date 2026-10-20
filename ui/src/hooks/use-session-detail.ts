@@ -2,17 +2,31 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { sessionApi } from "@/lib/api/session";
-import { normalizeEvent, normalizeEvents } from "@/lib/session-events";
-import type { SessionDetail, SSEEventData, SessionFile } from "@/lib/api/types";
+import {
+  mergeSessionEvents,
+  normalizeEvent,
+  normalizeEvents,
+} from "@/lib/session-events";
+import type { Session, SSEEventData, SessionFile, ToolEvent } from "@/lib/api/types";
 
 const EMPTY_STREAM_RETRY_DELAYS = [1000, 2000, 4000] as const;
+const TIMELINE_RUN_LIMIT = 1;
+const MIN_LOAD_MORE_DURATION_MS = 500;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export type UseSessionDetailResult = {
-  session: SessionDetail | null;
+  session: Session | null;
+  sessionSSEEvent: SSEEventData[];
   files: SessionFile[];
-  events: SSEEventData[];
   loading: boolean;
   error: Error | null;
+  hasMoreEvents: boolean;
+  loadingMoreEvents: boolean;
+  loadMoreError: Error | null;
+  loadMoreEvents: () => Promise<boolean>;
   refresh: () => Promise<void>;
   refreshFiles: () => Promise<void>;
   sendMessage: (message: string, attachmentIds: string[]) => Promise<void>;
@@ -26,12 +40,17 @@ export type UseSessionDetailResult = {
 export function useSessionDetail(
   sessionId: string | null,
   initialSkipEmptyStream?: boolean,
+  onRealtimeTool?: (tool: ToolEvent) => void,
 ): UseSessionDetailResult {
-  const [session, setSession] = useState<SessionDetail | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
+  const [sessionSSEEvent, setSessionSSEEvent] = useState<SSEEventData[]>([]);
   const [files, setFiles] = useState<SessionFile[]>([]);
-  const [events, setEvents] = useState<SSEEventData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
+  const [hasMoreEvents, setHasMoreEvents] = useState(false);
+  const [nextEventCursor, setNextEventCursor] = useState<string | null>(null);
+  const [loadingMoreEvents, setLoadingMoreEvents] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<Error | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [skipEmptyStream, setSkipEmptyStream] = useState(
     initialSkipEmptyStream || false,
@@ -45,9 +64,21 @@ export function useSessionDetail(
   const messageStreamCleanupRef = useRef<(() => void) | null>(null);
   const isSendMessageRef = useRef(false);
   const lastEventIdRef = useRef<string | null>(null);
-  const sessionStatusRef = useRef<SessionDetail["status"] | null>(null);
+  const sessionStatusRef = useRef<Session["status"] | null>(null);
+  const loadingMoreEventsRef = useRef(false);
+  const activeSessionIdRef = useRef(sessionId);
+  const loadedSessionIdRef = useRef<string | null>(null);
+  const onRealtimeToolRef = useRef(onRealtimeTool);
 
-  const updateSessionStatus = useCallback((status: SessionDetail["status"]) => {
+  useEffect(() => {
+    activeSessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  useEffect(() => {
+    onRealtimeToolRef.current = onRealtimeTool;
+  }, [onRealtimeTool]);
+
+  const updateSessionStatus = useCallback((status: Session["status"]) => {
     sessionStatusRef.current = status;
     setSession((prev) => (prev ? { ...prev, status } : null));
   }, []);
@@ -70,7 +101,11 @@ export function useSessionDetail(
       const eventId = (evToAppend.data as { event_id?: string })?.event_id;
       if (eventId) lastEventIdRef.current = eventId;
 
-      setEvents((prev) => [...prev, evToAppend]);
+      setSessionSSEEvent((prev) => mergeSessionEvents(prev, [evToAppend]));
+
+      if (evToAppend.type === "tool") {
+        onRealtimeToolRef.current?.(evToAppend.data);
+      }
 
       // 更新会话标题
       if (
@@ -231,17 +266,36 @@ export function useSessionDetail(
     if (!sessionId) return;
     setError(null);
     try {
-      const [detail, fileListRaw] = await Promise.all([
-        sessionApi.getSessionDetail(sessionId),
+      const [detail, fileListRaw, sseEvents] = await Promise.all([
+        sessionApi.getSession(sessionId),
         sessionApi.getSessionFiles(sessionId),
+        sessionApi.getSessionEventTimeline(sessionId, {
+          limit: TIMELINE_RUN_LIMIT,
+        }),
       ]);
+
+      if (activeSessionIdRef.current !== sessionId) return;
+
       sessionStatusRef.current = detail.status;
       setSession(detail);
       setFiles(normalizeFileList(fileListRaw));
-      const rawEvents = (detail as { events?: unknown }).events;
-      if (rawEvents && Array.isArray(rawEvents) && rawEvents.length > 0) {
-        const normalized = normalizeEvents(rawEvents);
-        setEvents(normalized);
+      const rawEvents = sseEvents?.events || [];
+      const normalized = normalizeEvents(rawEvents);
+      const isInitialLoad = loadedSessionIdRef.current !== sessionId;
+      if (isInitialLoad) {
+        setSessionSSEEvent(normalized);
+        setNextEventCursor(sseEvents.next_cursor);
+        setHasMoreEvents(Boolean(sseEvents.has_more && sseEvents.next_cursor));
+        loadedSessionIdRef.current = sessionId;
+      } else {
+        // 刷新只同步最新一页，不丢弃用户已经上拉加载的历史页和分页游标。
+        setSessionSSEEvent((currentEvents) =>
+          mergeSessionEvents(currentEvents, normalized),
+        );
+      }
+      setLoadMoreError(null);
+
+      if (normalized.length > 0) {
         const lastEvId = (
           normalized[normalized.length - 1]?.data as { event_id?: string }
         )?.event_id;
@@ -254,6 +308,69 @@ export function useSessionDetail(
     }
   }, [sessionId, normalizeFileList]);
 
+  const loadMoreEvents = useCallback(async (): Promise<boolean> => {
+    if (
+      !sessionId ||
+      !hasMoreEvents ||
+      !nextEventCursor ||
+      loadingMoreEventsRef.current
+    ) {
+      return false;
+    }
+
+    const requestedSessionId = sessionId;
+    const requestedCursor = nextEventCursor;
+    loadingMoreEventsRef.current = true;
+    setLoadingMoreEvents(true);
+    setLoadMoreError(null);
+
+    try {
+      const startedAt = Date.now();
+      const page = await sessionApi.getSessionEventTimeline(
+        requestedSessionId,
+        {
+          limit: TIMELINE_RUN_LIMIT,
+          before: requestedCursor,
+        },
+      );
+
+      const remainingDelay =
+        MIN_LOAD_MORE_DURATION_MS - (Date.now() - startedAt);
+      if (remainingDelay > 0) {
+        await delay(remainingDelay);
+      }
+
+      if (activeSessionIdRef.current !== requestedSessionId) return false;
+
+      if (page.has_more && page.next_cursor === requestedCursor) {
+        setLoadMoreError(new Error("分页游标未推进，请重新加载后重试"));
+        return false;
+      }
+
+      const olderEvents = normalizeEvents(page.events);
+      setSessionSSEEvent((currentEvents) =>
+        mergeSessionEvents(olderEvents, currentEvents),
+      );
+      setNextEventCursor(page.next_cursor);
+      setHasMoreEvents(Boolean(page.has_more && page.next_cursor));
+      return true;
+    } catch (loadError) {
+      if (activeSessionIdRef.current === requestedSessionId) {
+        setLoadMoreError(
+          loadError instanceof Error
+            ? loadError
+            : new Error("加载更早记录失败"),
+        );
+      }
+      return false;
+    } finally {
+      loadingMoreEventsRef.current = false;
+      if (activeSessionIdRef.current === requestedSessionId) {
+        setLoadingMoreEvents(false);
+      }
+    }
+  }, [hasMoreEvents, nextEventCursor, sessionId]);
+
   const refreshFiles = useCallback(async () => {
     if (!sessionId) return;
     try {
@@ -265,13 +382,20 @@ export function useSessionDetail(
   }, [sessionId, normalizeFileList]);
 
   useEffect(() => {
+    loadedSessionIdRef.current = null;
+
     if (!sessionId) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setLoading(false);
       setSession(null);
       setFiles([]);
-      setEvents([]);
+      setSessionSSEEvent([]);
       setError(null);
+      setHasMoreEvents(false);
+      setNextEventCursor(null);
+      setLoadingMoreEvents(false);
+      setLoadMoreError(null);
+      loadingMoreEventsRef.current = false;
       sessionStatusRef.current = null;
       stopEmptyStream();
       return;
@@ -394,10 +518,14 @@ export function useSessionDetail(
 
   return {
     session,
+    sessionSSEEvent,
     files,
-    events,
     loading,
     error,
+    hasMoreEvents,
+    loadingMoreEvents,
+    loadMoreError,
+    loadMoreEvents,
     refresh,
     refreshFiles,
     sendMessage,

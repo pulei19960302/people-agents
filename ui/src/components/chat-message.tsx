@@ -1,21 +1,27 @@
-'use client'
+"use client";
 
-import { useState } from 'react'
-import { cn } from '@/lib/utils'
-import { CheckIcon, ChevronDown, Languages } from 'lucide-react'
-import { PeopleAgentIcon } from '@/components/people-agent-icon'
-import { ToolUse } from '@/components/tool-use'
-import { AttachmentsMessage } from '@/components/attachments-message'
-import { MarkdownContent } from '@/components/markdown-content'
-import type { ToolEvent } from '@/lib/api/types'
-import { type TimelineItem, type AttachmentFile, getToolTimeLabel } from '@/lib/session-events'
+import { useState } from "react";
+import { cn } from "@/lib/utils";
+import { CheckIcon, ChevronDown, Languages } from "lucide-react";
+import { PeopleAgentIcon } from "@/components/people-agent-icon";
+import { ToolUse } from "@/components/tool-use";
+import { AttachmentsMessage } from "@/components/attachments-message";
+import { MarkdownContent } from "@/components/markdown-content";
+import type { ToolEvent } from "@/lib/api/types";
+import {
+  type TimelineItem,
+  type AttachmentFile,
+  getToolTimeLabel,
+} from "@/lib/session-events";
 
 export interface ChatMessageProps {
-  className?: string
-  item: TimelineItem
-  onViewAllFiles?: () => void
-  onFileClick?: (file: AttachmentFile) => void
-  onToolClick?: (tool: ToolEvent) => void
+  className?: string;
+  item: TimelineItem;
+  onViewAllFiles?: () => void;
+  onFileClick?: (file: AttachmentFile) => void;
+  onToolClick?: (tool: ToolEvent) => void;
+  stepExpanded?: boolean;
+  onStepExpandedChange?: (stepId: string, expanded: boolean) => void;
 }
 
 function ToolRow({
@@ -23,31 +29,31 @@ function ToolRow({
   timeLabel,
   children,
 }: {
-  className?: string
-  timeLabel?: string
-  children: React.ReactNode
+  className?: string;
+  timeLabel?: string;
+  children: React.ReactNode;
 }) {
-  const [hovered, setHovered] = useState(false)
+  const [hovered, setHovered] = useState(false);
   return (
     <div
       className={cn(
-        'flex items-center justify-between gap-2 mt-3 w-full min-w-0',
-        className
+        "flex items-center justify-between gap-2 mt-3 w-full min-w-0",
+        className,
       )}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <div className="min-w-0 flex-shrink-0">{children}</div>
+      <div className="min-w-0 shrink-0">{children}</div>
       <span
         className={cn(
-          'flex-shrink-0 text-xs text-muted-foreground min-w-[2.5rem] text-right transition-opacity duration-150',
-          hovered ? 'opacity-100' : 'opacity-0'
+          "shrink-0 text-xs text-muted-foreground min-w-[2.5rem] text-right transition-opacity duration-150",
+          hovered ? "opacity-100" : "opacity-0",
         )}
       >
-        {timeLabel ?? '刚刚'}
+        {timeLabel ?? "刚刚"}
       </span>
     </div>
-  )
+  );
 }
 
 export function ChatMessage({
@@ -56,29 +62,29 @@ export function ChatMessage({
   onViewAllFiles,
   onFileClick,
   onToolClick,
+  stepExpanded,
+  onStepExpandedChange,
 }: ChatMessageProps) {
-  if (item.kind === 'user') {
+  if (item.kind === "user") {
     return (
       <div
         className={cn(
-          'flex w-full flex-col items-end justify-end gap-1 group mt-3',
-          className
+          "flex w-full flex-col items-end justify-end gap-1 group mt-3",
+          className,
         )}
       >
         <div className="flex max-w-[90%] relative flex-col gap-2 items-end">
           <div className="text-foreground relative flex items-center rounded-lg overflow-hidden glass p-3 border border-border">
-            {item.data.message ?? ''}
+            {item.data.message ?? ""}
           </div>
         </div>
       </div>
-    )
+    );
   }
 
-  if (item.kind === 'assistant') {
+  if (item.kind === "assistant") {
     return (
-      <div
-        className={cn('flex flex-col gap-2 w-full group mt-3', className)}
-      >
+      <div className={cn("flex flex-col gap-2 w-full group mt-3", className)}>
         <div className="flex items-center justify-between h-7 group">
           <div className="flex items-center justify-center gap-1 text-foreground">
             <Languages size={18} />
@@ -86,47 +92,53 @@ export function ChatMessage({
           </div>
         </div>
         <div className="max-w-none p-0 m-0 text-foreground">
-          <MarkdownContent content={item.data.message ?? ''} />
+          <MarkdownContent content={item.data.message ?? ""} />
         </div>
       </div>
-    )
+    );
   }
 
-  if (item.kind === 'tool') {
+  if (item.kind === "tool") {
     return (
-      <ToolRow
-        className={className}
-        timeLabel={item.timeLabel}
-      >
-        <ToolUse data={item.data} onClick={onToolClick ? () => onToolClick(item.data) : undefined} />
+      <ToolRow className={className} timeLabel={item.timeLabel}>
+        <ToolUse
+          data={item.data}
+          onClick={onToolClick ? () => onToolClick(item.data) : undefined}
+        />
       </ToolRow>
-    )
+    );
   }
 
-  if (item.kind === 'step') {
+  if (item.kind === "step") {
     return (
-      <StepBlock stepItem={item} className={className} onToolClick={onToolClick} />
-    )
+      <StepBlock
+        stepItem={item}
+        className={className}
+        expanded={stepExpanded ?? true}
+        onExpandedChange={onStepExpandedChange}
+        onToolClick={onToolClick}
+      />
+    );
   }
 
-  if (item.kind === 'attachments') {
+  if (item.kind === "attachments") {
     return (
-      <div className={cn('mt-3', className)}>
+      <div className={cn("mt-3", className)}>
         <AttachmentsMessage
           role={item.role}
           files={item.files}
-          onViewAllFiles={item.role === 'assistant' ? onViewAllFiles : undefined}
+          onViewAllFiles={
+            item.role === "assistant" ? onViewAllFiles : undefined
+          }
           onFileClick={onFileClick}
         />
       </div>
-    )
+    );
   }
 
-  if (item.kind === 'error') {
+  if (item.kind === "error") {
     return (
-      <div
-        className={cn('flex flex-col gap-2 w-full group mt-3', className)}
-      >
+      <div className={cn("flex flex-col gap-2 w-full group mt-3", className)}>
         <div className="flex items-center justify-between h-7 group">
           <div className="flex items-center justify-center gap-1 text-red-600">
             <Languages size={18} />
@@ -137,35 +149,38 @@ export function ChatMessage({
           <MarkdownContent content={item.error} />
         </div>
       </div>
-    )
+    );
   }
 
-  return null
+  return null;
 }
 
 function StepBlock({
   stepItem,
   className,
   onToolClick,
+  expanded,
+  onExpandedChange,
 }: {
-  stepItem: Extract<TimelineItem, { kind: 'step' }>
-  className?: string
-  onToolClick?: (tool: ToolEvent) => void
+  stepItem: Extract<TimelineItem, { kind: "step" }>;
+  className?: string;
+  onToolClick?: (tool: ToolEvent) => void;
+  expanded: boolean;
+  onExpandedChange?: (stepId: string, expanded: boolean) => void;
 }) {
-  const [expanded, setExpanded] = useState(true)
-  const { data, tools } = stepItem
-  const isCompleted = data.status === 'completed'
+  const { data, tools } = stepItem;
+  const toggleExpanded = () => onExpandedChange?.(stepItem.id, !expanded);
 
   return (
-    <div className={cn('flex flex-col mt-3', className)}>
+    <div className={cn("flex flex-col mt-3", className)}>
       <div
         role="button"
         tabIndex={0}
-        onClick={() => setExpanded(!expanded)}
+        onClick={toggleExpanded}
         onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault()
-            setExpanded((prev) => !prev)
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            toggleExpanded();
           }
         }}
         className="text-sm w-full cursor-pointer flex gap-2 justify-between group/header truncate text-foreground rounded-md hover:bg-accent transition-colors outline-none focus-visible:ring-2 focus-visible:ring-primary"
@@ -173,7 +188,7 @@ function StepBlock({
         <div className="flex flex-row gap-2 justify-start items-center truncate min-w-0 flex-1">
           <div
             className={cn(
-              'w-4 h-4 flex-shrink-0 flex items-center justify-center border rounded-[15px] bg-primary'
+              "w-4 h-4 shrink-0 flex items-center justify-center border rounded-[15px] bg-primary",
             )}
           >
             <CheckIcon className="text-white" size={10} />
@@ -182,24 +197,33 @@ function StepBlock({
             {data.description}
           </div>
           <ChevronDown
-            className={cn('flex-shrink-0 transition-transform text-muted-foreground', expanded && 'rotate-180')}
+            className={cn(
+              "shrink-0 transition-transform text-muted-foreground",
+              expanded && "rotate-180",
+            )}
           />
         </div>
       </div>
       {expanded && tools.length > 0 && (
         <div className="flex">
-          <div className="w-6 relative flex-shrink-0">
+          <div className="w-6 relative shrink-0">
             <div className="absolute left-[7px] top-2 bottom-0 w-[1px] border-l border-dashed border-border" />
           </div>
           <div className="flex flex-col gap-3 flex-1 min-w-0 overflow-hidden pt-2 transition-[max-height,opacity] duration-150 ease-in-out">
             {tools.map((tool, idx) => (
-              <ToolRow key={`${data.id}-tool-${idx}`} timeLabel={getToolTimeLabel(tool)}>
-                <ToolUse data={tool} onClick={onToolClick ? () => onToolClick(tool) : undefined} />
+              <ToolRow
+                key={`${data.id}-tool-${tool.tool_call_id ?? idx}`}
+                timeLabel={getToolTimeLabel(tool)}
+              >
+                <ToolUse
+                  data={tool}
+                  onClick={onToolClick ? () => onToolClick(tool) : undefined}
+                />
               </ToolRow>
             ))}
           </div>
         </div>
       )}
     </div>
-  )
+  );
 }

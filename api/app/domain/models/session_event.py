@@ -2,12 +2,15 @@ from datetime import datetime
 
 import uuid
 
+from pydantic import TypeAdapter
 from typing import Optional, Dict, Any
 
 from pydantic import BaseModel, Field
 
-from app.domain.models.event import BaseEvent, ToolEvent
+from app.domain.models.event import Event, BaseEvent, ToolEvent
 
+
+_event_adapter = TypeAdapter(Event)
 
 class SessionEvent(BaseModel):
     """事件领域模型"""
@@ -61,6 +64,7 @@ class SessionEvent(BaseModel):
             mode="json",
             exclude={
                 "id",
+                "run_id",
                 "type",
                 "created_at",
             },
@@ -69,9 +73,22 @@ class SessionEvent(BaseModel):
         return cls(
             event_id=event.id,
             session_id=session_id,
-            run_id=run_id,
+            run_id=run_id if run_id is not None else event.run_id,
             event_type=event.type,
             tool_call_id=tool_call_id,
             payload=payload,
             occurred_at=event.created_at,
         )
+
+
+    def to_event(
+            self,
+    ) -> Event:
+        """将持久化事件恢复为Agent业务事件。"""
+        return _event_adapter.validate_python({
+            **self.payload,
+            "id": self.event_id,
+            "run_id": self.run_id,
+            "type": self.event_type,
+            "created_at": self.occurred_at,
+        })
