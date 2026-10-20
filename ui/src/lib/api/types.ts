@@ -10,7 +10,7 @@ export type ApiResponse<T = unknown> = {
 /**
  * 会话状态
  */
-export type SessionStatus = "pending" | "running" | "waiting" | "completed";
+export type SessionStatus = "pending" | "running" | "waiting" | "completed" | "failed";
 
 /**
  * 执行状态

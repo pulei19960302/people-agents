@@ -268,3 +268,17 @@ class DBSessionRepository(SessionRepository):
 
         # 3.如果记忆不存在，则构建一个空记忆后返回
         return Memory(messages=[])
+
+
+    async def clear_task_id(self, session_id: str, expected_task_id: str) -> None:
+        """
+        旧任务T1完成
+        新任务T2已经创建并写入session.task_id
+        T1的延迟回调才开始执行
+        """
+        stmt = (
+            update(SessionModel)
+            .where(SessionModel.id == session_id, SessionModel.task_id == expected_task_id)
+            .values(task_id=None)
+        )
+        await self.db_session.execute(stmt)

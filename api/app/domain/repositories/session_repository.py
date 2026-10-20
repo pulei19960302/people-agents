@@ -75,3 +75,7 @@ class SessionRepository(Protocol):
     async def get_memory(self, session_id: str, agent_name: str) -> Memory:
         """根据传递的会话id+Agent名字获取记忆"""
         ...
+
+
+    async def clear_task_id(self, session_id: str, expected_task_id: str) -> None:
+        ...

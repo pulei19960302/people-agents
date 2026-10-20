@@ -7,7 +7,6 @@ import uuid
 from pydantic import BaseModel, Field
 
 
-@dataclass(slots=True)
 class File(BaseModel):
     """文件信息Domain模型，用于记录Manus/Human上传or生成的文件"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))  # 文件id

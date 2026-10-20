@@ -160,7 +160,8 @@ export function useSessionDetail(
 
       // error 事件时也可以认为任务结束
       if (evToAppend.type === "error") {
-        updateSessionStatus("completed");
+        updateSessionStatus("failed");
+        setStreaming(false);
       }
     },
     [updateSessionStatus],
@@ -496,7 +497,7 @@ export function useSessionDetail(
           setError(err instanceof Error ? err : new Error("流式响应异常"));
           setStreaming(false);
           isSendMessageRef.current = false;
-          updateSessionStatus("completed");
+          void refresh()
           if (messageStreamCleanupRef.current) {
             messageStreamCleanupRef.current();
             messageStreamCleanupRef.current = null;

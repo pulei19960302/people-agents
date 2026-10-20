@@ -100,7 +100,10 @@ class PlannerReActFlow(BaseFlow):
         #    - 任务未结束，还在运行，但是用户又传递一条消息
         #    - Agent在等待人类输入，这时候人类输入了
         #   这时候均需要处理历史消息列表，避免AI(工具调用消息)后直接接上人类消息
-        if session.status != SessionStatus.PENDING:
+        if session.status in {
+            SessionStatus.WAITING,
+            SessionStatus.RUNNING,
+        }:
             logger.debug(f"会话[{self._session_id}]未处于空闲状态，回滚数据确保消息列表格式正确")
             await self.planner.roll_back(message)
             await self.react.roll_back(message)

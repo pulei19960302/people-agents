@@ -418,7 +418,7 @@ class AgentTaskRunner(TaskRunner):
                     elif isinstance(event, ErrorEvent):
                         # 错误是任务终态。保留Redis Stream，便于排查和恢复。
                         async with self._uow:
-                            await self._uow.session.update_status(self._session_id, SessionStatus.COMPLETED)
+                            await self._uow.session.update_status(self._session_id, SessionStatus.FAILED)
                         return
 
                     # 11.判断如果输入消息队列为空则跳出循环
@@ -448,7 +448,7 @@ class AgentTaskRunner(TaskRunner):
             logger.exception(f"AgentTaskRunner运行出错: {str(e)}")
             await self._put_and_add_event(task, ErrorEvent(error=f"AgentTaskRunner出错: {str(e)}"))
             async with self._uow:
-                await self._uow.session.update_status(self._session_id, SessionStatus.COMPLETED)
+                await self._uow.session.update_status(self._session_id, SessionStatus.FAILED)
         finally:
             # 15.在同一个asyncio Task上下文中清理MCP/A2A工具资源
             # 这是关键：streamable_http_client内部使用anyio.create_task_group()，
@@ -469,4 +469,10 @@ class AgentTaskRunner(TaskRunner):
 
     async def on_done(self, task: Task) -> None:
         """任务结束时执行的回调函数"""
-        logger.info(f"AgentTaskRunner任务执行结束")
+        async with self._uow:
+            await self._uow.session.clear_task_id(
+                session_id=self._session_id,
+                expected_task_id=task.id,
+            )
+
+        logger.info(f"AgentTaskRunner任务执行结束, task id: {task.id}已被清空")
