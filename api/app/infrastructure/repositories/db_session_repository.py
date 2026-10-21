@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models.file import File
 from app.domain.models.memory import Memory
-from app.domain.models.session import Session, SessionStatus
+from app.domain.models.session import Session
 from app.domain.repositories.session_repository import SessionRepository
 from app.infrastructure.models import SessionModel
 
@@ -166,20 +166,6 @@ class DBSessionRepository(SessionRepository):
 
         return None
 
-    async def update_status(self, session_id: str, status: SessionStatus) -> None:
-        """更新会话状态"""
-        # 1.构建更新语句并执行
-        stmt = (
-            update(SessionModel)
-            .where(SessionModel.id == session_id)
-            .values(status=status.value)
-        )
-        result = await self.db_session.execute(stmt)
-
-        # 2.检查是否更新成功
-        if result.rowcount == 0:
-            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
-
     async def update_unread_message_count(self, session_id: str, count: int) -> None:
         """更新会话的未读消息数"""
         # 1.构建更新语句并执行
@@ -268,17 +254,3 @@ class DBSessionRepository(SessionRepository):
 
         # 3.如果记忆不存在，则构建一个空记忆后返回
         return Memory(messages=[])
-
-
-    async def clear_task_id(self, session_id: str, expected_task_id: str) -> None:
-        """
-        旧任务T1完成
-        新任务T2已经创建并写入session.task_id
-        T1的延迟回调才开始执行
-        """
-        stmt = (
-            update(SessionModel)
-            .where(SessionModel.id == session_id, SessionModel.task_id == expected_task_id)
-            .values(task_id=None)
-        )
-        await self.db_session.execute(stmt)

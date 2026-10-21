@@ -3,10 +3,9 @@
 from datetime import datetime
 from typing import Protocol, List, Optional
 
-from app.domain.models.event import BaseEvent
 from app.domain.models.file import File
 from app.domain.models.memory import Memory
-from app.domain.models.session import Session, SessionStatus
+from app.domain.models.session import Session
 
 
 class SessionRepository(Protocol):
@@ -52,10 +51,6 @@ class SessionRepository(Protocol):
         """根据传递的会话id减少未读消息数"""
         ...
 
-    async def update_status(self, session_id: str, status: SessionStatus) -> None:
-        """根据传递的会话id更新会话状态"""
-        ...
-
     async def add_file(self, session_id: str, file: File) -> None:
         """往会话中新增文件"""
         ...
@@ -76,6 +71,3 @@ class SessionRepository(Protocol):
         """根据传递的会话id+Agent名字获取记忆"""
         ...
 
-
-    async def clear_task_id(self, session_id: str, expected_task_id: str) -> None:
-        ...

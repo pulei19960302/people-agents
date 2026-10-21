@@ -34,7 +34,6 @@ class SessionModel(Base):
         default=lambda: str(uuid.uuid4()),
     )  # 会话id
     sandbox_id: Mapped[str] = mapped_column(String(255), nullable=True)  # 沙箱id
-    task_id: Mapped[str] = mapped_column(String(255), nullable=True)  # 任务id
     title: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
@@ -76,11 +75,6 @@ class SessionModel(Base):
         nullable=False,
         server_default=text("'{}'::jsonb"),
     )  # 会话两个Agent的记忆
-    status: Mapped[str] = mapped_column(
-        String(255),
-        nullable=False,
-        server_default=text("''::character varying"),
-    )  # 会话状态
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,

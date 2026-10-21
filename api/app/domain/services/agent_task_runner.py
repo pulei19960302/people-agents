@@ -24,7 +24,6 @@ from app.domain.models.file import File
 from app.domain.models.message import Message
 from app.domain.models.session_event import SessionEvent
 from app.domain.models.search import SearchResults
-from app.domain.models.session import SessionStatus
 from app.domain.models.session_run import SessionRunStatus
 from app.domain.models.tool_result import ToolResult
 from app.domain.repositories.uow import IUnitOfWork
