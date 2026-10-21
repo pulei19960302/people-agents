@@ -67,7 +67,7 @@ class OpenAILLM(LLM):
                     timeout=self._timeout,
                 )
             else:
-                # 2.为传递工具则删除tools/tool_choice等参数
+                # 2.未传递工具则删除tools/tool_choice等参数
                 logger.info(f"调用OpenAI客户端向LLM发起请求未携带: {self._model_name}")
                 response = await self._client.chat.completions.create(
                     model=self._model_name,
