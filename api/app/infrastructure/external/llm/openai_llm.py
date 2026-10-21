@@ -29,7 +29,7 @@ class OpenAILLM(LLM):
         self._model_name = llm_config.model_name
         self._temperature = llm_config.temperature
         self._max_tokens = llm_config.max_tokens
-        self._timeout = 3600
+        self._timeout = 120
 
     @property
     def model_name(self) -> str:

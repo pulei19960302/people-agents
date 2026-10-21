@@ -82,12 +82,14 @@ class BaseAgent(ABC):
         for _ in range(self._agent_config.max_retries):
             try:
                 # 4.调用语言模型获取响应内容
-                message = await self._llm.invoke(
+                message = await asyncio.wait_for(self._llm.invoke(
                     messages=self._memory.get_messages(),
                     tools=self._get_available_tools(),
                     response_format=response_format,
                     tool_choice=self._tool_choice,
-                )
+                ), timeout=120)
+
+                logger.info(f"大模型回复了内容: {message}")
 
                 # 5.处理AI响应内容避免空回复
                 if message.get("role") == "assistant":
