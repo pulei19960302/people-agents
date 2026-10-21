@@ -277,3 +277,221 @@ class BaseAgent(ABC):
             yield MessageEvent(message=message["content"])
         else:
             yield ErrorEvent(error="Agent未能生成有效回复内容")
+
+
+    async def resume_waiting_tool_call(
+            self,
+            message: Message,
+    ) -> bool:
+        """将用户回答补充为message_ask_user对应的tool消息。
+
+        返回True表示找到了等待回答的工具调用并成功补充，
+        返回False表示当前Agent没有等待回答的工具调用。
+        """
+        await self._ensure_memory()
+        assert self._memory is not None
+        messages = self._memory.get_messages()
+
+        # 从后向前寻找最近一次尚未回答的message_ask_user。
+        for assistant_index in range(len(messages) - 1, -1, -1):
+            assistant_message = messages[assistant_index]
+
+            if assistant_message.get("role") != "assistant":
+                continue
+
+            tool_calls = assistant_message.get("tool_calls") or []
+            if not tool_calls:
+                continue
+
+            # 统计紧跟在assistant消息后的合法tool响应。
+            answered_tool_call_ids: set[str] = set()
+            insert_index = assistant_index + 1
+
+            while (
+                    insert_index < len(messages)
+                    and messages[insert_index].get("role") == "tool"
+            ):
+                tool_call_id = messages[insert_index].get(
+                    "tool_call_id"
+                )
+
+                if tool_call_id:
+                    answered_tool_call_ids.add(tool_call_id)
+
+                insert_index += 1
+
+            for tool_call in tool_calls:
+                tool_call_id = tool_call.get("id")
+                function_name = (
+                    tool_call.get("function", {}).get("name")
+                )
+
+                if function_name != "message_ask_user":
+                    continue
+
+                if not tool_call_id:
+                    continue
+
+                if tool_call_id in answered_tool_call_ids:
+                    continue
+
+                # 必须插入到assistant.tool_calls之后，
+                # 不能简单追加到消息列表末尾。
+                messages.insert(
+                    insert_index,
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "function_name": function_name,
+                        "content": message.model_dump_json(),
+                    },
+                )
+                uow = self._uow_factory()
+                async with uow:
+                    await uow.session.save_memory(
+                        session_id=self._session_id,
+                        agent_name=self.name,
+                        memory=self._memory,
+                    )
+
+                logger.info(
+                    "Agent[%s]已恢复等待用户回答的工具调用[%s]",
+                    self.name,
+                    tool_call_id,
+                )
+
+                return True
+
+        return False
+
+    async def repair_incomplete_tool_chain(self) -> bool:
+        """修复中断产生的不完整工具调用消息链。
+
+        assistant消息只要包含tool_calls，每个tool_call_id都必须立即
+        跟随一条对应的tool消息，否则OpenAI兼容接口会返回HTTP 400。
+
+        返回True表示修改了记忆，False表示原消息链已经完整。
+        """
+
+        await self._ensure_memory()
+        assert self._memory is not None
+
+        original_messages = list(
+            self._memory.get_messages()
+        )
+
+        repaired_messages: list[dict[str, Any]] = []
+        changed = False
+        index = 0
+
+        while index < len(original_messages):
+            current_message = original_messages[index]
+
+            # 没有紧跟assistant.tool_calls的tool消息本身也是非法的，
+            # 因此忽略这类孤立tool消息。
+            if current_message.get("role") == "tool":
+                logger.warning(
+                    "Agent[%s]删除孤立tool消息，tool_call_id=%s",
+                    self.name,
+                    current_message.get("tool_call_id"),
+                )
+                changed = True
+                index += 1
+                continue
+
+            repaired_messages.append(current_message)
+
+            tool_calls = (
+                current_message.get("tool_calls") or []
+                if current_message.get("role") == "assistant"
+                else []
+            )
+
+            if not tool_calls:
+                index += 1
+                continue
+
+            expected_calls = {
+                tool_call.get("id"): tool_call
+                for tool_call in tool_calls
+                if tool_call.get("id")
+            }
+
+            answered_ids: set[str] = set()
+            next_index = index + 1
+
+            # 收集紧跟在assistant.tool_calls之后的tool消息。
+            while (
+                    next_index < len(original_messages)
+                    and original_messages[next_index].get("role")
+                    == "tool"
+            ):
+                tool_message = original_messages[next_index]
+                tool_call_id = tool_message.get("tool_call_id")
+
+                # 只保留当前assistant真正发出的工具调用结果，
+                # 同一个tool_call_id只保留一次。
+                if (
+                        tool_call_id in expected_calls
+                        and tool_call_id not in answered_ids
+                ):
+                    repaired_messages.append(tool_message)
+                    answered_ids.add(tool_call_id)
+                else:
+                    changed = True
+                    logger.warning(
+                        "Agent[%s]删除无效或重复tool消息，"
+                        "tool_call_id=%s",
+                        self.name,
+                        tool_call_id,
+                    )
+
+                next_index += 1
+
+            # 为缺失结果的工具调用补充“结果未知”消息。
+            for tool_call_id, tool_call in expected_calls.items():
+                if tool_call_id in answered_ids:
+                    continue
+
+                function_name = (
+                        tool_call.get("function", {}).get("name")
+                        or "unknown"
+                )
+
+                repaired_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "function_name": function_name,
+                    "content": (
+                        "任务执行期间发生中断，未取得该工具调用的最终结果。"
+                        "该操作可能已经执行。继续任务前需要检查实际状态，"
+                        "避免重复执行具有副作用的操作。"
+                    ),
+                })
+
+                changed = True
+
+                logger.warning(
+                    "Agent[%s]修复未完成工具调用，"
+                    "tool_call_id=%s，function=%s",
+                    self.name,
+                    tool_call_id,
+                    function_name,
+                )
+
+            index = next_index
+
+        if not changed:
+            return False
+
+        self._memory.messages = repaired_messages
+
+        uow = self._uow_factory()
+        async with uow:
+            await uow.session.save_memory(
+                session_id=self._session_id,
+                agent_name=self.name,
+                memory=self._memory,
+            )
+
+        return True

@@ -13,7 +13,6 @@ from app.domain.models.event import BaseEvent, PlanEvent, PlanEventStatus, Title
 from app.domain.models.event import DoneEvent
 from app.domain.models.message import Message
 from app.domain.models.plan import Plan, ExecutionStatus
-from app.domain.models.session import SessionStatus
 from app.domain.services.agents.planner import PlannerAgent
 from app.domain.services.agents.react import ReActAgent
 from app.domain.services.tools.a2a import A2ATool
@@ -25,6 +24,7 @@ from app.domain.services.tools.search import SearchTool
 from app.domain.services.tools.shell import ShellTool
 from .base import BaseFlow, FlowStatus
 from ...models.session_event import SessionEvent
+from ...models.session_run import SessionRunStatus
 from ...repositories.uow import IUnitOfWork
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,8 @@ class PlannerReActFlow(BaseFlow):
             llm: LLM,  # 大语言模型
             agent_config: AgentConfig,  # 智能体配置
             session_id: str,  # 会话id
+            run_id: str,
+            resume_from_status: SessionRunStatus,
             json_parser: JSONParser,  # JSON解析器
             browser: Browser,  # 浏览器
             sandbox: Sandbox,  # 沙箱
@@ -52,6 +54,8 @@ class PlannerReActFlow(BaseFlow):
         self._uow = uow_factory()
         self._session_id = session_id
         self.status = FlowStatus.IDLE
+        self._run_id = run_id
+        self._resume_from_status = resume_from_status
         self.plan: Optional[Plan] = None
 
         # 2.初始化Agent预设工具列表
@@ -87,52 +91,106 @@ class PlannerReActFlow(BaseFlow):
         )
         logger.debug(f"创建执行Agent成功, 会话id: {self._session_id}")
 
+
+    async def _restore_plan(self) -> bool:
+        """根据当前run_id恢复最新Plan。"""
+        uow = self._uow_factory()
+        async with uow:
+            session_plan = await uow.session_event.get_last_plan(
+                session_id=self._session_id,
+                run_id=self._run_id,
+            )
+
+        if session_plan is None:
+            logger.warning(
+                "运行[%s]没有找到可以恢复的Plan",
+                self._run_id,
+            )
+            return False
+
+        event = session_plan.to_event()
+
+        if not isinstance(event, PlanEvent):
+            raise TypeError(
+                "最新计划记录无法恢复为PlanEvent，"
+                f"实际类型为[{type(event).__name__}]"
+            )
+
+        self.plan = event.plan
+
+        logger.info(
+            "运行[%s]恢复Plan[%s]成功",
+            self._run_id,
+            self.plan.id,
+        )
+
+        return True
+
     async def invoke(self, message: Message) -> AsyncGenerator[BaseEvent, None]:
         """传递消息，运行流，在六中调用planner&react智能体组合完成任务并返回对应事件"""
-        # 1.调用会话仓库查询会话是否存在
+
+        # 调用会话仓库查询会话是否存在
         async with self._uow:
             session = await self._uow.session.get_by_id(self._session_id)
+            run = await self._uow.session_run.get_by_id(self._run_id)
         if not session:
             raise ValueError(f"会话[{self._session_id}]不存在, 请核实后尝试")
 
-        # 2.判断会话的状态是不是空闲
-        #   如果不是则有可能有两种状态
-        #    - 任务未结束，还在运行，但是用户又传递一条消息
-        #    - Agent在等待人类输入，这时候人类输入了
-        #   这时候均需要处理历史消息列表，避免AI(工具调用消息)后直接接上人类消息
-        if session.status in {
-            SessionStatus.WAITING,
-            SessionStatus.RUNNING,
-        }:
-            logger.debug(f"会话[{self._session_id}]未处于空闲状态，回滚数据确保消息列表格式正确")
-            await self.planner.roll_back(message)
-            await self.react.roll_back(message)
+        if run is None:
+            raise ValueError(f"运行[{self._run_id}]不存在")
 
-        # 3.如果会话状态等于运行中，则流需要重新规划内容/plan
-        if session.status == SessionStatus.RUNNING:
-            logger.debug(f"会话[{self._session_id}]处于运行状态并传递了新消息")
+        # 本次Task创建前的状态。
+        resume_status = self._resume_from_status
+
+        logger.info(
+            "运行[%s]开始执行，恢复前状态=%s",
+            self._run_id,
+            resume_status.value,
+        )
+
+        if self._resume_from_status == SessionRunStatus.WAITING:
+            planner_resumed = await self.planner.resume_waiting_tool_call(message)
+            react_resumed = await self.react.resume_waiting_tool_call(message)
+
+            if not planner_resumed and not react_resumed:
+                raise RuntimeError(
+                    "任务处于WAITING状态，"
+                    "但没有找到等待用户回答的工具调用"
+                )
+
+                # 修复同一份历史中其他可能存在的悬空工具调用。
+            await self.planner.repair_incomplete_tool_chain()
+            await self.react.repair_incomplete_tool_chain()
+
+
+
+            restored = await self._restore_plan()
+            self.status = (
+                FlowStatus.EXECUTING
+                if restored
+                else FlowStatus.PLANNING
+            )
+
+        elif self._resume_from_status in {
+            SessionRunStatus.INTERRUPTED,
+            SessionRunStatus.FAILED,
+        }:
+            await self.planner.repair_incomplete_tool_chain()
+            await self.react.repair_incomplete_tool_chain()
+
+            restored = await self._restore_plan()
+            self.status = (
+                FlowStatus.EXECUTING
+                if restored
+                else FlowStatus.PLANNING
+            )
+
+        # 新创建的Run正常进入规划
+        else:
             self.status = FlowStatus.PLANNING
 
-        # 4.如果会话状态等于等待人类输入，则需要修改流的状态为执行中
-        if session.status == SessionStatus.WAITING:
-
-            session_plan = await self._uow.session_event.get_last_plan(session.id)
-
-            if session_plan is None:
-                raise RuntimeError("会话处于等待状态，但没有找到可恢复的计划")
-
-            event = session_plan.to_event()
-            if not isinstance(event, PlanEvent):
-                raise TypeError("最新计划记录无法恢复为 PlanEvent")
-
-            self.plan = event.plan
-
-            logger.debug(f"会话[{self._session_id}]处于等待状态并传递了新消息")
-            self.status = FlowStatus.EXECUTING
-
-        # 5.更新会话状态为运行中
-        async with self._uow:
-            await self._uow.session.update_status(self._session_id, SessionStatus.RUNNING)
+        # 防止同一个Flow再次invoke时重复执行恢复操作。
+        self._resume_from_status = SessionRunStatus.RUNNING
 
         logger.info(f"Planner&ReAct流接收消息: {message.message[:50]}...")
 

@@ -24,6 +24,7 @@ from app.interfaces.schemas.session import (
     ListSessionItem,
     ChatRequest,
     GetSessionResponse, GetSessionFilesResponse, FileReadResponse, FileReadRequest, ShellReadResponse, ShellReadRequest,
+    ResumeRunRequest,
 )
 from app.interfaces.schemas.session_event import ListSessionEventsResponse, SessionEventResponse, ListSessionEventTimelineResponse
 from app.interfaces.service_dependencies import get_session_service, get_agent_service, get_session_event_service
@@ -90,19 +91,21 @@ async def stream_sessions(
         """定义一个异步迭代器，用于获取所有会话列表"""
         while True:
             # 1.获取所有会话列表
-            sessions = await session_service.get_all_sessions()
+            states = await session_service.get_all_session_states()
 
             # 2.循环遍历并组装数据
             session_items = [
                 ListSessionItem(
-                    session_id=session.id,
-                    title=session.title,
-                    latest_message=session.latest_message,
-                    latest_message_at=session.latest_message_at,
-                    status=session.status,
-                    unread_message_count=session.unread_message_count,
+                    session_id=state.session.id,
+                    title=state.session.title,
+                    latest_message=state.session.latest_message,
+                    latest_message_at=state.session.latest_message_at,
+                    run_id=state.run_id,
+                    status=state.status,
+                    can_resume=state.can_resume,
+                    unread_message_count=state.session.unread_message_count,
                 )
-                for session in sessions
+                for state in states
             ]
 
             # 3.将会话列表转换为流式事件数据并返回
@@ -127,17 +130,19 @@ async def get_all_sessions(
         session_service: SessionService = Depends(get_session_service),
 ) -> Response[ListSessionResponse]:
     """获取PeopleAgent项目中所有任务会话基础信息列表"""
-    sessions = await session_service.get_all_sessions()
+    states = await session_service.get_all_session_states()
     session_items = [
         ListSessionItem(
-            session_id=session.id,
-            title=session.title,
-            latest_message=session.latest_message,
-            latest_message_at=session.latest_message_at,
-            status=session.status,
-            unread_message_count=session.unread_message_count,
+            session_id=state.session.id,
+            title=state.session.title,
+            latest_message=state.session.latest_message,
+            latest_message_at=state.session.latest_message_at,
+            run_id=state.run_id,
+            status=state.status,
+            can_resume=state.can_resume,
+            unread_message_count=state.session.unread_message_count,
         )
-        for session in sessions
+        for state in states
     ]
     return Response.success(
         msg="获取任务会话列表成功",
@@ -220,15 +225,17 @@ async def get_session(
         session_service: SessionService = Depends(get_session_service),
 ) -> Response[GetSessionResponse]:
     """传递指定会话id获取该会话的对话详情"""
-    session = await session_service.get_session(session_id)
-    if not session:
+    state = await session_service.get_session_state(session_id)
+    if state is None:
         raise NotFoundError("该会话不存在，请核实后重试")
     return Response.success(
         msg="获取会话详情成功",
         data=GetSessionResponse(
-            session_id=session.id,
-            title=session.title,
-            status=session.status,
+            session_id=state.session.id,
+            title=state.session.title,
+            run_id=state.run_id,
+            status=state.status,
+            can_resume=state.can_resume,
         )
     )
 
@@ -415,3 +422,36 @@ async def vnc_websocket(
         # 其他错误记录日志并关闭websocket
         logger.error(f"WebSocket异常: {str(e)}")
         await websocket.close(code=1011, reason=f"WebSocket异常: {str(e)}")
+
+
+@router.post(
+    "/{session_id}/runs/{run_id}/resume",
+    summary="恢复被中断的任务",
+)
+async def resume_session_run(
+    session_id: str,
+    run_id: str,
+    request: ResumeRunRequest,
+    agent_service: AgentService = Depends(get_agent_service),
+) -> EventSourceResponse:
+    async def event_generator():
+        async for event in agent_service.chat(
+                session_id=session_id,
+                message=request.message,
+                attachments=request.attachments,
+                latest_event_id=request.event_id,
+                timestamp=(
+                        datetime.fromtimestamp(request.timestamp)
+                        if request.timestamp
+                        else None
+                ),
+                resume_run_id=run_id,
+        ):
+            sse_event = EventMapper.event_to_sse_event(event)
+            if sse_event:
+                yield ServerSentEvent(
+                    event=sse_event.event,
+                    data=sse_event.data.model_dump_json(),
+                )
+
+    return EventSourceResponse(event_generator())

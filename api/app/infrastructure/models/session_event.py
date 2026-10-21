@@ -43,8 +43,13 @@ class SessionEventModel(Base):
 
     run_id: Mapped[Optional[str]] = mapped_column(
         String(255),
+        ForeignKey(
+            "session_runs.id",
+            name="fk_session_events_run_id",
+            ondelete="CASCADE",
+            onupdate="CASCADE",
+        ),
         nullable=True,
-        index=False
     )
 
     event_type:Mapped[str] = mapped_column(

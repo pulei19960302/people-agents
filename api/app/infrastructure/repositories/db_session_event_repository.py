@@ -74,12 +74,13 @@ class DBSessionEventRepository(SessionEventRepository):
         return record.to_domain() if record is not None else None
 
 
-    async def get_last_plan(self, session_id: str) -> SessionEvent | None:
+    async def get_last_plan(self, session_id: str, run_id: str) -> SessionEvent | None:
 
         stmt = (
             select(SessionEventModel)
             .where(
                 SessionEventModel.session_id == session_id,
+                SessionEventModel.run_id == run_id,
                 SessionEventModel.event_type == "plan"
             )
             .order_by(SessionEventModel.created_at.desc())
@@ -87,9 +88,7 @@ class DBSessionEventRepository(SessionEventRepository):
         )
 
         result = await self.db_session.execute(stmt)
-
         record = result.scalars().one_or_none()
-
         return record.to_domain() if record is not None else None
 
 

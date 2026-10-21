@@ -6,7 +6,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from app.domain.models.file import File
-from app.domain.models.session import SessionStatus
+from app.domain.models.session_run import SessionRunStatus
 
 
 class CreateSessionResponse(BaseModel):
@@ -19,8 +19,10 @@ class ListSessionItem(BaseModel):
     session_id: str = ""
     title: str = ""
     latest_message: str = ""
-    latest_message_at: Optional[datetime] = Field(default_factory=datetime.now)
-    status: SessionStatus = SessionStatus.PENDING
+    latest_message_at: Optional[datetime] = None
+    run_id: str | None = None
+    status: SessionRunStatus = SessionRunStatus.PENDING
+    can_resume: bool = False
     unread_message_count: int = 0
 
 
@@ -41,7 +43,9 @@ class GetSessionResponse(BaseModel):
     """获取会话详情响应结构"""
     session_id: str
     title: Optional[str] = None
-    status: SessionStatus
+    run_id: str | None = None
+    status: SessionRunStatus
+    can_resume: bool = False
 
 
 class GetSessionFilesResponse(BaseModel):
@@ -77,3 +81,10 @@ class ShellReadResponse(BaseModel):
     session_id: str
     output: str
     console_records: List[ConsoleRecord] = Field(default_factory=list)
+
+
+class ResumeRunRequest(BaseModel):
+    message: str = "继续执行这个任务"
+    attachments: list[str] = Field(default_factory=list)
+    event_id: str | None = None
+    timestamp: int | None = None

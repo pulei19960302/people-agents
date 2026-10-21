@@ -10,6 +10,7 @@ from app.domain.repositories.uow import IUnitOfWork
 from .db_file_repository import DBFileRepository
 from .db_session_event_repository import DBSessionEventRepository
 from .db_session_repository import DBSessionRepository
+from .db_session_run_repository import DBSessionRunRepository
 
 logger = logging.getLogger(__name__)
 
@@ -39,31 +40,32 @@ class DBUnitOfWork(IUnitOfWork):
         self.file = DBFileRepository(db_session=self.db_session)
         self.session = DBSessionRepository(db_session=self.db_session)
         self.session_event = DBSessionEventRepository(db_session=self.db_session)
+        self.session_run = DBSessionRunRepository(db_session=self.db_session)
 
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """退出上下文时执行的逻辑，如果出现异常则回滚，否则提交
+        """正常退出时提交，异常退出时回滚，并传播所有异常。"""
+        if self.db_session is None:
+            return False
 
-        当SSE客户端断开连接时，sse_starlette的cancel scope会取消所有await操作，
-        包括此处的commit/rollback/close。如果不妥善处理CancelledError，
-        会导致连接池中的连接处于异常状态，影响后续使用该池的其他任务。
-        """
         try:
-            if exc_type:
-                await self.rollback()
-            else:
+            if exc_type is None:
                 await self.commit()
+            else:
+                await self.rollback()
         except asyncio.CancelledError:
-            # SSE断连等场景下cancel scope取消了commit/rollback操作，
-            # 记录警告但不让异常传播，避免后续close操作也被跳过
-            logger.warning("UoW提交/回滚操作被取消(可能是客户端断开连接)")
-        except Exception as e:
-            logger.warning(f"UoW提交/回滚操作失败: {e}")
+            raise
+        except Exception:
+            logger.exception("UoW提交或回滚失败")
+            raise
         finally:
             try:
                 await self.db_session.close()
             except asyncio.CancelledError:
-                logger.warning("UoW关闭数据库会话被取消(可能是客户端断开连接)")
-            except Exception as e:
-                logger.warning(f"UoW关闭数据库会话失败: {e}")
+                raise
+            except Exception:
+                logger.exception("UoW关闭数据库会话失败")
+                raise
+
+        return False

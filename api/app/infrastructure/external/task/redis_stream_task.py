@@ -72,7 +72,7 @@ class RedisStreamTask(Task):
         """取消当前执行的任务"""
         if not self.done:
             # 1.取消任务
-            self._execute_task_execution_task.cancel()
+            self._execution_task.cancel()
             logger.info(f"任务[{self._id}]已取消")
 
             # 2.清除注册的当前任务

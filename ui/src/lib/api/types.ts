@@ -10,7 +10,14 @@ export type ApiResponse<T = unknown> = {
 /**
  * 会话状态
  */
-export type SessionStatus = "pending" | "running" | "waiting" | "completed" | "failed";
+export type SessionStatus =
+  | "pending"
+  | "running"
+  | "waiting"
+  | "interrupted"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 /**
  * 执行状态
@@ -152,8 +159,10 @@ export type Session = {
   session_id: string;
   title: string;
   latest_message: string;
-  latest_message_at: string;
+  latest_message_at: string | null;
+  run_id: string | null;
   status: SessionStatus;
+  can_resume: boolean;
   unread_message_count: number;
   [key: string]: unknown;
 };

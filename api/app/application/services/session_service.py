@@ -1,16 +1,40 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import logging
+from dataclasses import dataclass
 from typing import List, Callable, Type
 
 from app.application.errors.exceptions import NotFoundError, ServerRequestsError
 from app.domain.external.sandbox import Sandbox
 from app.domain.models.file import File
 from app.domain.models.session import Session
+from app.domain.models.session_run import SessionRun, SessionRunStatus
 from app.domain.repositories.uow import IUnitOfWork
 from app.interfaces.schemas.session import FileReadResponse, ShellReadResponse
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SessionState:
+    """会话基础信息及其最新一次运行状态。"""
+
+    session: Session
+    latest_run: SessionRun | None
+
+    @property
+    def run_id(self) -> str | None:
+        return self.latest_run.id if self.latest_run else None
+
+    @property
+    def status(self) -> SessionRunStatus:
+        if self.latest_run is None:
+            return SessionRunStatus.PENDING
+        return self.latest_run.status
+
+    @property
+    def can_resume(self) -> bool:
+        return self.latest_run.status.can_resume if self.latest_run else False
 
 
 class SessionService:
@@ -40,6 +64,23 @@ class SessionService:
         async with self._uow:
             return await self._uow.session.get_all()
 
+    async def get_all_session_states(self) -> list[SessionState]:
+        """获取所有会话及其最新一次运行，避免列表接口逐条查询Run。"""
+        uow = self._uow_factory()
+        async with uow:
+            sessions = await uow.session.get_all()
+            latest_runs = await uow.session_run.get_latest_by_session_ids(
+                [session.id for session in sessions]
+            )
+
+        return [
+            SessionState(
+                session=session,
+                latest_run=latest_runs.get(session.id),
+            )
+            for session in sessions
+        ]
+
     async def clear_unread_message_count(self, session_id: str) -> None:
         """清空指定会话未读消息数"""
         logger.info(f"清除会话[{session_id}]未读消息数")
@@ -65,6 +106,23 @@ class SessionService:
         """获取指定会话详情信息"""
         async with self._uow:
             return await self._uow.session.get_by_id(session_id)
+
+    async def get_session_state(
+            self,
+            session_id: str,
+    ) -> SessionState | None:
+        """获取指定会话及其最新一次运行。"""
+        uow = self._uow_factory()
+        async with uow:
+            session = await uow.session.get_by_id(session_id)
+            if session is None:
+                return None
+
+            latest_run = await uow.session_run.get_latest_by_session_id(
+                session_id
+            )
+
+        return SessionState(session=session, latest_run=latest_run)
 
     async def get_session_files(self, session_id: str) -> List[File]:
         """根据传递的会话id获取指定会话的文件列表信息"""

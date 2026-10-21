@@ -56,6 +56,16 @@ async def lifespan(app: FastAPI):
     # 3.初始化Redis/Postgres/Cos客户端
     await get_redis().init()
     await get_postgres().init()
+
+    interrupted_count = (
+        await get_agent_service().interrupt_orphaned_runs()
+    )
+    logger.info(
+        "启动时标记了%s个失联任务为interrupted",
+        interrupted_count,
+    )
+
+
     # COS初始化可能失败（本地开发环境未配置），只记录警告
     try:
         await get_cos().init()

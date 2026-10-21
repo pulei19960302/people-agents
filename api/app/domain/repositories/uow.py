@@ -6,6 +6,7 @@ from typing import TypeVar
 from .file_repository import FileRepository
 from .session_event_repository import SessionEventRepository
 from .session_repository import SessionRepository
+from .session_run_repository import SessionRunRepository
 
 T = TypeVar("T", bound="IUnitOfWork")
 
@@ -15,6 +16,7 @@ class IUnitOfWork(ABC):
     file: FileRepository
     session: SessionRepository
     session_event: SessionEventRepository
+    session_run: SessionRunRepository
 
     @abstractmethod
     async def commit(self):

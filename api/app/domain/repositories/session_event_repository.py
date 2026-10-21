@@ -18,7 +18,7 @@ class SessionEventRepository(Protocol):
     async def get_by_event_id(self, event_id: str) -> SessionEvent | None:
         ...
 
-    async def get_last_plan(self, session_id: str) -> SessionEvent | None:
+    async def get_last_plan(self, session_id: str, run_id: str) -> SessionEvent | None:
         ...
 
     async def get_run_page_by_session_id(

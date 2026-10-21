@@ -18,7 +18,7 @@ class AppException(RuntimeError):
         self.status_code = status_code
         self.msg = msg
         self.data = data
-        super().__init__()
+        super().__init__(msg)
 
 
 class BadRequestError(AppException):

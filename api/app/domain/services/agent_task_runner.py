@@ -25,6 +25,7 @@ from app.domain.models.message import Message
 from app.domain.models.session_event import SessionEvent
 from app.domain.models.search import SearchResults
 from app.domain.models.session import SessionStatus
+from app.domain.models.session_run import SessionRunStatus
 from app.domain.models.tool_result import ToolResult
 from app.domain.repositories.uow import IUnitOfWork
 from app.domain.services.flows.planner_react import PlannerReActFlow
@@ -48,6 +49,8 @@ class AgentTaskRunner(TaskRunner):
             mcp_config: MCPConfig,  # mcp配置
             a2a_config: A2AConfig,  # a2a配置
             session_id: str,  # 会话id
+            run_id: str, # 运行id
+            resume_from_status: SessionRunStatus, # 恢复的状态
             file_storage: FileStorage,  # 文件存储桶
             json_parser: JSONParser,  # json解析器
             browser: Browser,  # 浏览器
@@ -58,6 +61,8 @@ class AgentTaskRunner(TaskRunner):
         self._uow_factory = uow_factory
         self._uow = uow_factory()
         self._session_id = session_id
+        self._run_id = run_id
+        self._resume_from_status = resume_from_status
         self._sandbox = sandbox
         self._mcp_config = mcp_config
         self._mcp_tool = MCPTool()
@@ -70,6 +75,8 @@ class AgentTaskRunner(TaskRunner):
             llm=llm,
             agent_config=agent_config,
             session_id=session_id,
+            run_id=run_id,
+            resume_from_status=resume_from_status,
             json_parser=json_parser,
             browser=browser,
             sandbox=sandbox,
@@ -81,13 +88,13 @@ class AgentTaskRunner(TaskRunner):
     async def _put_and_add_event(self, task: Task, event: Event) -> None:
         """将事件写入Redis Stream并持久化到session_events表。"""
         # 1.关联本次Agent运行，保证实时事件和历史事件具有相同的run_id。
-        event.run_id = task.id
+        event.run_id = self._run_id
 
         # 2.发送到Redis Stream。
         # Redis返回的是Stream游标，不要覆盖业务事件event.id。
         stream_id = await task.output_stream.put(event.model_dump_json())
         # 3.转换为数据库会话事件。
-        session_event = SessionEvent.from_event(session_id=self._session_id, event=event, run_id=task.id)
+        session_event = SessionEvent.from_event(session_id=self._session_id, event=event, run_id=self._run_id)
         # 4.每次数据库操作创建独立UoW。
         uow = self._uow_factory()
 
@@ -413,12 +420,12 @@ class AgentTaskRunner(TaskRunner):
                     elif isinstance(event, WaitEvent):
                         # 10.如果事件为等待，则更新会话状态并终止程序
                         async with self._uow:
-                            await self._uow.session.update_status(self._session_id, SessionStatus.WAITING)
+                            await self._uow.session_run.update_status(self._run_id, SessionRunStatus.WAITING)
                         return
                     elif isinstance(event, ErrorEvent):
                         # 错误是任务终态。保留Redis Stream，便于排查和恢复。
                         async with self._uow:
-                            await self._uow.session.update_status(self._session_id, SessionStatus.FAILED)
+                            await self._uow.session_run.update_status(self._run_id, SessionRunStatus.FAILED, error=event.error)
                         return
 
                     # 11.判断如果输入消息队列为空则跳出循环
@@ -427,7 +434,7 @@ class AgentTaskRunner(TaskRunner):
 
             # 12.更新会话状态为已完成
             async with self._uow:
-                await self._uow.session.update_status(self._session_id, SessionStatus.COMPLETED)
+                await self._uow.session_run.update_status(self._run_id, SessionRunStatus.COMPLETED)
 
             # SSE正常消费DoneEvent后会立即删除Stream。TTL用于客户端提前
             # 断开、没有消费者等场景，避免成功任务的数据永久留在Redis。
@@ -437,20 +444,24 @@ class AgentTaskRunner(TaskRunner):
             except Exception as e:
                 logger.warning(f"成功任务设置Redis Stream过期时间失败: {e}")
         except asyncio.CancelledError:
-            # 13.异步任务被取消，推送结束事件并跟新状态
-            logger.info(f"AgentTaskRunner任务运行取消")
-            await self._put_and_add_event(task, DoneEvent())
+            logger.info(
+                "运行[%s]对应任务被中断",
+                self._run_id,
+            )
             async with self._uow:
-                await self._uow.session.update_status(self._session_id, SessionStatus.COMPLETED)
-            raise
+                await self._uow.session_run.update_status(
+                    self._run_id,
+                    SessionRunStatus.INTERRUPTED
+                )
+                raise
         except Exception as e:
             # 14.记录日志并往任务队列/消息队列中写入异常事件并更新会话状态
             logger.exception(f"AgentTaskRunner运行出错: {str(e)}")
             await self._put_and_add_event(task, ErrorEvent(error=f"AgentTaskRunner出错: {str(e)}"))
             async with self._uow:
-                await self._uow.session.update_status(self._session_id, SessionStatus.FAILED)
+                await self._uow.session_run.update_status(self._run_id, SessionRunStatus.FAILED, error=str(e))
         finally:
-            # 15.在同一个asyncio Task上下文中清理MCP/A2A工具资源
+            # 在同一个asyncio Task上下文中清理MCP/A2A工具资源
             # 这是关键：streamable_http_client内部使用anyio.create_task_group()，
             # 要求在同一个Task中进入和退出cancel scope，
             # 所以必须在invoke()的finally块（即初始化MCP的同一个Task）中清理
@@ -470,8 +481,8 @@ class AgentTaskRunner(TaskRunner):
     async def on_done(self, task: Task) -> None:
         """任务结束时执行的回调函数"""
         async with self._uow:
-            await self._uow.session.clear_task_id(
-                session_id=self._session_id,
+            await self._uow.session_run.clear_task(
+                run_id=self._run_id,
                 expected_task_id=task.id,
             )
 

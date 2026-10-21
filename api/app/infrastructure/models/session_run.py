@@ -43,6 +43,14 @@ class SessionRunModel(Base):
              unique=True,
              postgresql_where=text("active_task_id IS NOT NULL"),
          ),
+         Index(
+             "uq_session_runs_one_active_per_session",
+             "session_id",
+             unique=True,
+             postgresql_where=text(
+                 "status IN ('pending', 'running', 'waiting')"
+             ),
+         ),
      )
 
 
