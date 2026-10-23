@@ -8,7 +8,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """沙箱API服务基础配置信息"""
     log_level: str = "INFO"  # 日志等级
-    server_timeout_minutes: int = 60  # 服务超时时间单位为分钟
+    # 固定Compose沙箱默认常驻；动态沙箱由API通过环境变量传入TTL。
+    server_timeout_minutes: int | None = None
 
     # 使用pydantic v2提供的写法完成环境变量信息的声明
     model_config = SettingsConfigDict(

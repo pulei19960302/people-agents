@@ -3,6 +3,7 @@
 import asyncio
 import io
 import logging
+import os
 import socket
 import uuid
 from typing import Optional, Self, BinaryIO
@@ -95,6 +96,42 @@ class DockerSandbox(Sandbox):
 
         return ip_address
 
+    @staticmethod
+    def _get_published_port(container: Model, container_port: int) -> Optional[str]:
+        """获取容器端口随机映射到宿主机后的端口。"""
+        bindings = container.attrs["NetworkSettings"]["Ports"].get(
+            f"{container_port}/tcp"
+        )
+        if not bindings:
+            return None
+        return bindings[0].get("HostPort")
+
+    @classmethod
+    def _from_container(cls, container: Model, container_name: str) -> Self:
+        """根据API运行位置选择Docker内网地址或宿主机映射地址。"""
+        if os.path.exists("/.dockerenv"):
+            # API运行在Docker中时，与沙箱位于同一网络，直接使用容器IP。
+            # CDP必须使用IP作为Host，否则新版Chromium会返回HTTP 500。
+            ip = cls._get_container_ip(container)
+            if not ip:
+                raise RuntimeError(f"无法获取沙箱容器[{container_name}]的Docker内网IP")
+            return cls(ip=ip, container_name=container_name)
+
+        # API在PyCharm等宿主机环境运行时，使用随机发布到本机的端口。
+        host_port_8080 = cls._get_published_port(container, 8080)
+        host_port_9222 = cls._get_published_port(container, 9222)
+        host_port_5901 = cls._get_published_port(container, 5901)
+        if not all((host_port_8080, host_port_9222, host_port_5901)):
+            raise RuntimeError(
+                f"沙箱容器[{container_name}]缺少8080、9222或5901端口映射"
+            )
+
+        sandbox = cls(ip="127.0.0.1", container_name=container_name)
+        sandbox._base_url = f"http://127.0.0.1:{host_port_8080}"
+        sandbox._cdp_url = f"http://127.0.0.1:{host_port_9222}"
+        sandbox._vnc_url = f"ws://127.0.0.1:{host_port_5901}"
+        return sandbox
+
     @classmethod
     def _create_task(cls) -> Self:
         """创建沙箱容器的异步任务"""
@@ -117,7 +154,7 @@ class DockerSandbox(Sandbox):
                 "detach": True,
                 "remove": True,
                 "environment": {
-                    "SERVICE_TIMEOUT_MINUTES": settings.sandbox_ttl_minutes,
+                    "SERVER_TIMEOUT_MINUTES": settings.sandbox_ttl_minutes,
                     "CHROME_ARGS": settings.sandbox_chrome_args,
                     "HTTPS_PROXY": settings.sandbox_https_proxy,
                     "HTTP_PROXY": settings.sandbox_http_proxy,
@@ -133,6 +170,7 @@ class DockerSandbox(Sandbox):
             container_config["ports"] = {
                 "8080/tcp": None,  # 随机映射沙箱 API 端口
                 "9222/tcp": None,  # 随机映射 CDP 端口
+                "5901/tcp": None,  # 随机映射 WebSocket VNC 端口
             }
 
             # 7.调用docker客户端容器运行参数创建沙箱
@@ -141,21 +179,22 @@ class DockerSandbox(Sandbox):
             # 8.重载并刷新容器信息
             container.reload()
 
-            # 9.获取映射后的宿主机端口
-            ports = container.attrs["NetworkSettings"]["Ports"]
-            host_port_8080 = ports["8080/tcp"][0]["HostPort"]
-            host_port_9222 = ports["9222/tcp"][0]["HostPort"]
-            ip = "host.docker.internal"
-
-            sandbox = DockerSandbox(ip=ip, container_name=container_name)
-            sandbox._base_url = f"http://{ip}:{host_port_8080}"
-            sandbox._cdp_url = f"http://{ip}:{host_port_9222}"
-
-            logger.info(f"沙箱容器[{container_name}]已创建，API端口: {host_port_8080}，CDP端口: {host_port_9222}")
+            # 9.根据API运行位置生成访问地址
+            sandbox = cls._from_container(container, container_name)
+            logger.info(
+                "沙箱容器[%s]已创建，API地址: %s，CDP地址: %s，VNC地址: %s",
+                container_name,
+                sandbox._base_url,
+                sandbox.cdp_url,
+                sandbox.vnc_url,
+            )
             return sandbox
         except Exception as e:
             logger.error(f"创建Docker沙箱容器失败: {str(e)}")
             raise Exception(f"创建Docker沙箱容器失败: {str(e)}")
+        finally:
+            if "docker_client" in locals():
+                docker_client.close()
 
     @classmethod
     async def create(cls) -> Self:
@@ -215,29 +254,8 @@ class DockerSandbox(Sandbox):
                     logger.warning(f"容器存在但未运行, 容器名字: {id}")
                     return None
 
-                # 5.获取端口映射（macOS Docker Desktop 需要通过映射端口访问）
-                ports = container.attrs["NetworkSettings"]["Ports"]
-                host_port_8080 = None
-                host_port_9222 = None
-                if "8080/tcp" in ports and ports["8080/tcp"]:
-                    host_port_8080 = ports["8080/tcp"][0]["HostPort"]
-                if "9222/tcp" in ports and ports["9222/tcp"]:
-                    host_port_9222 = ports["9222/tcp"][0]["HostPort"]
-
-                if host_port_8080:
-                    # 有端口映射，使用 localhost + 映射端口
-                    ip = "host.docker.internal"
-                    sandbox = DockerSandbox(ip=ip, container_name=id)
-                    sandbox._base_url = f"http://{ip}:{host_port_8080}"
-                    if host_port_9222:
-                        sandbox._cdp_url = f"http://{ip}:{host_port_9222}"
-                    return sandbox
-                else:
-                    # 无端口映射（Linux 原生 Docker），使用容器 IP
-                    ip = cls._get_container_ip(container)
-                    if not ip:
-                        return None
-                    return DockerSandbox(ip=ip, container_name=id)
+                # 5.根据API运行位置选择Docker内网或宿主机映射地址
+                return cls._from_container(container, id)
             except NotFound:
                 # 5.找不到容器(容器被销毁)
                 logger.warning(f"该容器找不到可能被销毁: {str(id)}")

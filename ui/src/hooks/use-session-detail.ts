@@ -78,10 +78,36 @@ export function useSessionDetail(
     onRealtimeToolRef.current = onRealtimeTool;
   }, [onRealtimeTool]);
 
-  const updateSessionStatus = useCallback((status: Session["status"]) => {
+  const updateSessionRunState = useCallback((
+    status: Session["status"],
+    canResume: boolean,
+  ) => {
     sessionStatusRef.current = status;
-    setSession((prev) => (prev ? { ...prev, status } : null));
+    setSession((prev) =>
+      prev ? { ...prev, status, can_resume: canResume } : null,
+    );
   }, []);
+
+  const refreshSessionState = useCallback(async () => {
+    if (!sessionId) return;
+
+    try {
+      const detail = await sessionApi.getSession(sessionId);
+      if (activeSessionIdRef.current !== sessionId) return;
+
+      sessionStatusRef.current = detail.status;
+      setSession(detail);
+      setError(null);
+    } catch (refreshError) {
+      if (activeSessionIdRef.current === sessionId) {
+        setError(
+          refreshError instanceof Error
+            ? refreshError
+            : new Error("刷新会话状态失败"),
+        );
+      }
+    }
+  }, [sessionId]);
 
   const appendEvent = useCallback(
     (ev: SSEEventData) => {
@@ -100,6 +126,15 @@ export function useSessionDetail(
 
       const eventId = (evToAppend.data as { event_id?: string })?.event_id;
       if (eventId) lastEventIdRef.current = eventId;
+
+      const eventRunId = (evToAppend.data as { run_id?: string })?.run_id;
+      if (eventRunId) {
+        setSession((prev) =>
+          prev && prev.run_id !== eventRunId
+            ? { ...prev, run_id: eventRunId }
+            : prev,
+        );
+      }
 
       setSessionSSEEvent((prev) => mergeSessionEvents(prev, [evToAppend]));
 
@@ -124,10 +159,10 @@ export function useSessionDetail(
       if (evToAppend.type === "step") {
         const stepData = evToAppend.data as { status?: string };
         if (stepData.status === "running") {
-          updateSessionStatus("running");
+          updateSessionRunState("running", false);
         }
         if (stepData.status === "waiting") {
-          updateSessionStatus("waiting");
+          updateSessionRunState("waiting", true);
           setStreaming(false);
         }
       }
@@ -142,29 +177,32 @@ export function useSessionDetail(
           toolData.function === "message_ask_user" &&
           toolData.status === "calling"
         ) {
-          updateSessionStatus("waiting");
+          updateSessionRunState("waiting", true);
           setStreaming(false);
         }
       }
 
       // wait 事件 → 等待用户输入
       if (evToAppend.type === "wait") {
-        updateSessionStatus("waiting");
+        updateSessionRunState("waiting", true);
         setStreaming(false);
+        void refreshSessionState();
       }
 
       // done 事件时更新为 completed
       if (evToAppend.type === "done") {
-        updateSessionStatus("completed");
+        updateSessionRunState("completed", false);
+        setStreaming(false);
+        void refreshSessionState();
       }
 
-      // error 事件时也可以认为任务结束
+      // ErrorEvent 既可能是 failed，也可能是 interrupted，必须以后端状态为准。
       if (evToAppend.type === "error") {
-        updateSessionStatus("failed");
         setStreaming(false);
+        void refreshSessionState();
       }
     },
-    [updateSessionStatus],
+    [refreshSessionState, updateSessionRunState],
   );
 
   const startEmptyStream = useCallback(() => {
@@ -458,8 +496,14 @@ export function useSessionDetail(
       isSendMessageRef.current = true;
       setStreaming(true);
 
-      // 立即更新状态为 running，不等待 SSE 事件
-      updateSessionStatus("running");
+      const shouldResume =
+        session?.can_resume === true &&
+        session.run_id !== null &&
+        ["waiting", "interrupted", "failed"].includes(session.status);
+      const resumeRunId = shouldResume ? session.run_id : null;
+
+      // 立即进入运行态，最终状态仍由终止事件后的详情请求校准。
+      updateSessionRunState("running", false);
 
       const onEvent = (ev: SSEEventData) => {
         appendEvent(ev);
@@ -472,48 +516,55 @@ export function useSessionDetail(
           }
         }
       };
-      const messageStreamCleanup = sessionApi.chat(
-        sessionId,
-        { message, attachments: attachmentIds },
-        onEvent,
-        (err) => {
-          if (err.name === "AbortError") {
-            setStreaming(false);
-            isSendMessageRef.current = false;
-            return;
-          }
-          // 未收到终止事件却结束时，先以服务端状态为准，再尝试受限重连。
-          if (err.message === "SSE_STREAM_END") {
-            setStreaming(false);
-            isSendMessageRef.current = false;
-            if (messageStreamCleanupRef.current) {
-              messageStreamCleanupRef.current();
-              messageStreamCleanupRef.current = null;
-            }
-            void refresh().then(() => startEmptyStream());
-            return;
-          }
-          // 实际错误
-          setError(err instanceof Error ? err : new Error("流式响应异常"));
+      const onStreamError = (err: Error) => {
+        if (err.name === "AbortError") {
           setStreaming(false);
           isSendMessageRef.current = false;
-          void refresh()
+          return;
+        }
+        // 未收到终止事件却结束时，先以服务端状态为准，再尝试受限重连。
+        if (err.message === "SSE_STREAM_END") {
+          setStreaming(false);
+          isSendMessageRef.current = false;
           if (messageStreamCleanupRef.current) {
             messageStreamCleanupRef.current();
             messageStreamCleanupRef.current = null;
           }
-        },
-      );
+          void refresh().then(() => startEmptyStream());
+          return;
+        }
+        // 实际错误
+        setError(err instanceof Error ? err : new Error("流式响应异常"));
+        setStreaming(false);
+        isSendMessageRef.current = false;
+        void refreshSessionState();
+        if (messageStreamCleanupRef.current) {
+          messageStreamCleanupRef.current();
+          messageStreamCleanupRef.current = null;
+        }
+      };
+      const params = { message, attachments: attachmentIds };
+      const messageStreamCleanup = resumeRunId
+        ? sessionApi.resumeRun(
+            sessionId,
+            resumeRunId,
+            params,
+            onEvent,
+            onStreamError,
+          )
+        : sessionApi.chat(sessionId, params, onEvent, onStreamError);
       // 将消息流的 cleanup 存到独立的 ref，不与 emptyStream 混淆
       messageStreamCleanupRef.current = messageStreamCleanup;
     },
     [
       sessionId,
+      session,
       appendEvent,
       refresh,
+      refreshSessionState,
       startEmptyStream,
       stopEmptyStream,
-      updateSessionStatus,
+      updateSessionRunState,
     ],
   );
 

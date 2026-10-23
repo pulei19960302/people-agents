@@ -292,6 +292,7 @@ class AgentService:
             # 获取run的一些方法
             # 有消息表示发起新任务、回答WAITING任务或恢复指定Run
             if message:
+                # 感觉这里还需要一些判断。判断当前消息和上一轮的message 有无关联
                 run = await self._resolve_run(session_id=session_id, resume_run_id=resume_run_id)
             else:
                 # 没有消息表示SSE重新连接，不能创建新Run

@@ -28,6 +28,62 @@ const timelineRequests = new Map<
 >();
 
 /**
+ * 打开会话事件流。
+ * 新消息和恢复任务只有请求地址不同，SSE 的解析与清理方式完全一致。
+ */
+function openSessionEventStream(
+  path: string,
+  params: ChatParams,
+  onEvent: SSEEventHandler,
+  onError?: (error: Error) => void,
+): () => void {
+  const controller = new AbortController();
+
+  const startStream = async () => {
+    try {
+      const stream = await createSSEStream(path, params, {
+        signal: controller.signal,
+        timeout: 5 * 60 * 1000,
+      });
+
+      await parseSSEStream(
+        stream,
+        (messageEvent) => {
+          if (controller.signal.aborted) return;
+
+          const data =
+            typeof messageEvent.data === "string"
+              ? JSON.parse(messageEvent.data)
+              : messageEvent.data;
+
+          onEvent({
+            type: messageEvent.type as SSEEventData["type"],
+            data,
+          } as SSEEventData);
+        },
+        (error) => {
+          if (!controller.signal.aborted) onError?.(error);
+        },
+      );
+
+      if (!controller.signal.aborted) {
+        onError?.(new Error("SSE_STREAM_END"));
+      }
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") return;
+      if (!controller.signal.aborted) {
+        onError?.(
+          error instanceof Error ? error : new Error("启动聊天流失败"),
+        );
+      }
+    }
+  };
+
+  void startStream();
+  return () => controller.abort();
+}
+
+/**
  * 会话模块 API
  */
 export const sessionApi = {
@@ -170,64 +226,30 @@ export const sessionApi = {
     onEvent: SSEEventHandler,
     onError?: (error: Error) => void,
   ): (() => void) => {
-    const controller = new AbortController();
+    return openSessionEventStream(
+      `/sessions/${sessionId}/chat`,
+      params,
+      onEvent,
+      onError,
+    );
+  },
 
-    const startStream = async () => {
-      try {
-        const stream = await createSSEStream(
-          `/sessions/${sessionId}/chat`,
-          params,
-          {
-            signal: controller.signal,
-            // 流式连接需要很长时间，设置为 5 分钟超时
-            timeout: 5 * 60 * 1000,
-          },
-        );
-
-        await parseSSEStream(
-          stream,
-          (messageEvent) => {
-            if (controller.signal.aborted) return;
-
-            // messageEvent.data 已经在 parseSSEStream 中解析为对象
-            const data =
-              typeof messageEvent.data === "string"
-                ? JSON.parse(messageEvent.data)
-                : messageEvent.data;
-
-            onEvent({
-              type: messageEvent.type as SSEEventData["type"],
-              data,
-            } as SSEEventData);
-          },
-          (error) => {
-            if (!controller.signal.aborted && onError) {
-              onError(error);
-            }
-          },
-        );
-
-        // 流正常结束（服务端关闭连接），通知上层以便重连或状态恢复
-        if (!controller.signal.aborted && onError) {
-          onError(new Error("SSE_STREAM_END"));
-        }
-      } catch (error) {
-        // 忽略 AbortError，这是正常的连接中止
-        if (error instanceof Error && error.name === "AbortError") {
-          return;
-        }
-        if (!controller.signal.aborted && onError) {
-          onError(error instanceof Error ? error : new Error("启动聊天流失败"));
-        }
-      }
-    };
-
-    startStream();
-
-    // 返回清理函数：通过 AbortController 中止连接
-    return () => {
-      controller.abort();
-    };
+  /**
+   * 恢复可恢复的 Run，并继续接收该 Run 的 SSE 事件。
+   */
+  resumeRun: (
+    sessionId: string,
+    runId: string,
+    params: ChatParams,
+    onEvent: SSEEventHandler,
+    onError?: (error: Error) => void,
+  ): (() => void) => {
+    return openSessionEventStream(
+      `/sessions/${sessionId}/runs/${runId}/resume`,
+      params,
+      onEvent,
+      onError,
+    );
   },
 
   /**

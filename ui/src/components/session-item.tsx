@@ -1,7 +1,17 @@
 'use client'
 
-import {useCallback, useEffect, useState} from 'react'
-import {CircuitBoard, Loader2, MoreHorizontal, Trash} from 'lucide-react'
+import {useCallback} from 'react'
+import {
+  Ban,
+  CircleAlert,
+  CircleCheck,
+  CircuitBoard,
+  Loader2,
+  MessageCircleMore,
+  MoreHorizontal,
+  Trash,
+  TriangleAlert,
+} from 'lucide-react'
 import {Button} from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -21,17 +31,30 @@ type SessionItemProps = {
   onDelete: (session: Session) => void
 }
 
+function SessionStatusIcon({status}: {status: Session['status']}) {
+  switch (status) {
+    case 'running':
+      return <Loader2 className="animate-spin"/>
+    case 'waiting':
+      return <MessageCircleMore/>
+    case 'interrupted':
+      return <TriangleAlert/>
+    case 'failed':
+      return <CircleAlert/>
+    case 'cancelled':
+      return <Ban/>
+    case 'completed':
+      return <CircleCheck/>
+    default:
+      return <CircuitBoard/>
+  }
+}
+
 /**
  * 单个会话列表项
  * 展示会话标题、描述、时间及操作菜单
  */
 export function SessionItem({session, isActive, onClick, onDelete}: SessionItemProps) {
-  const [mounted, setMounted] = useState(false)
-
-  useEffect(() => {
-    setMounted(true)
-  }, [])
-
   const handleClick = useCallback(() => {
     onClick(session.session_id)
   }, [onClick, session.session_id])
@@ -43,8 +66,6 @@ export function SessionItem({session, isActive, onClick, onDelete}: SessionItemP
 
   const description = session.latest_message || '暂无消息'
   const dateLabel = formatRelativeDate(session.latest_message_at)
-  const isRunning = session.status === 'running' || session.status === 'waiting'
-
   return (
     <Item
       className={`p-2 hover:bg-accent cursor-pointer gap-2 items-start transition-all ${isActive ? 'bg-accent glow-border' : ''}`}
@@ -54,10 +75,7 @@ export function SessionItem({session, isActive, onClick, onDelete}: SessionItemP
       <ItemMedia>
         <Avatar className="size-8">
           <AvatarGroupCount>
-            {isRunning
-              ? <Loader2 className="animate-spin"/>
-              : <CircuitBoard/>
-            }
+            <SessionStatusIcon status={session.status}/>
           </AvatarGroupCount>
         </Avatar>
       </ItemMedia>
@@ -73,30 +91,28 @@ export function SessionItem({session, isActive, onClick, onDelete}: SessionItemP
       {/* 右侧操作区 */}
       <ItemActions className="flex flex-col pt-0.5 gap-0 self-start">
         <ItemDescription className="text-xs whitespace-nowrap">{dateLabel}</ItemDescription>
-        {mounted && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                size="icon-xs"
-                variant="ghost"
-                className="cursor-pointer"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <MoreHorizontal/>
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="center" side="bottom">
-              <DropdownMenuItem
-                variant="destructive"
-                className="cursor-pointer"
-                onClick={handleDelete}
-              >
-                <Trash/>
-                删除
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              className="cursor-pointer"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <MoreHorizontal/>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="center" side="bottom">
+            <DropdownMenuItem
+              variant="destructive"
+              className="cursor-pointer"
+              onClick={handleDelete}
+            >
+              <Trash/>
+              删除
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </ItemActions>
     </Item>
   )

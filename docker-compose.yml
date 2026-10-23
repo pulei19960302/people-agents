@@ -52,7 +52,7 @@ services:
         DOCKER_IMAGE_REGISTRY: ${DOCKER_IMAGE_REGISTRY:-docker.1ms.run/library}
     image: people-agent-sandbox
     container_name: people-agent-sandbox
-    restart: "no"
+    restart: unless-stopped
     networks:
       - people-agent-network
 

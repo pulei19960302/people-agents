@@ -89,8 +89,6 @@ class BaseAgent(ABC):
                     tool_choice=self._tool_choice,
                 ), timeout=120)
 
-                logger.info(f"大模型回复了内容: {message}")
-
                 # 5.处理AI响应内容避免空回复
                 if message.get("role") == "assistant":
                     if not message.get("content") and not message.get("tool_calls"):
