@@ -66,6 +66,16 @@ class DBSessionRepository(SessionRepository):
         # 2.判断会话记录是否存在并返回
         return record.to_domain() if record is not None else None
 
+    async def lock_for_run_resolution(self, session_id: str) -> bool:
+        """锁定会话行，直到当前UoW提交或回滚。"""
+        stmt = (
+            select(SessionModel.id)
+            .where(SessionModel.id == session_id)
+            .with_for_update()
+        )
+        result = await self.db_session.execute(stmt)
+        return result.scalar_one_or_none() is not None
+
     async def delete_by_id(self, session_id: str) -> None:
         """根据传递的id删除会话"""
         # 1.构建删除语句

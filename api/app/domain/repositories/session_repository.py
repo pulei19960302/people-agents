@@ -27,6 +27,10 @@ class SessionRepository(Protocol):
         """根据传递的会话id查询会话"""
         ...
 
+    async def lock_for_run_resolution(self, session_id: str) -> bool:
+        """锁定会话行，使该会话的Run决策在当前事务中串行执行。"""
+        ...
+
     async def delete_by_id(self, session_id: str) -> None:
         """根据传递的会话id删除会话"""
         ...

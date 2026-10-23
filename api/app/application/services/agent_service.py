@@ -135,8 +135,13 @@ class AgentService:
         uow = self._uow_factory()
 
         async with uow:
+            # 同一Session的Run决策必须串行执行。该行锁会一直持有到
+            # 当前UoW退出，确保“读取最新Run”和“创建新Run”是一个原子过程。
+            session_locked = await uow.session.lock_for_run_resolution(session_id)
+            if not session_locked:
+                raise RuntimeError(f"会话[{session_id}]不存在")
 
-            # 根据session id
+            # 获取锁后再读取，确保拿到前一个并发请求提交后的最新状态。
             latest_run = (
                 await uow.session_run.get_latest_by_session_id(session_id)
             )
