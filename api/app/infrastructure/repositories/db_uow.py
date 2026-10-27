@@ -7,6 +7,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from app.domain.repositories.uow import IUnitOfWork
+from .db_agent_context_repository import DBAgentContextRepository
 from .db_file_repository import DBFileRepository
 from .db_session_event_repository import DBSessionEventRepository
 from .db_session_repository import DBSessionRepository
@@ -41,6 +42,7 @@ class DBUnitOfWork(IUnitOfWork):
         self.session = DBSessionRepository(db_session=self.db_session)
         self.session_event = DBSessionEventRepository(db_session=self.db_session)
         self.session_run = DBSessionRunRepository(db_session=self.db_session)
+        self.agent_context = DBAgentContextRepository(db_session=self.db_session)
 
         return self
 

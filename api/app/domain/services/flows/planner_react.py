@@ -77,6 +77,7 @@ class PlannerReActFlow(BaseFlow):
             llm=llm,
             json_parser=json_parser,
             tools=tools,
+            run_id=run_id
         )
         logger.debug(f"创建规划Agent成功, 会话id: {self._session_id}")
 
@@ -88,6 +89,7 @@ class PlannerReActFlow(BaseFlow):
             llm=llm,
             json_parser=json_parser,
             tools=tools,
+            run_id=run_id
         )
         logger.debug(f"创建执行Agent成功, 会话id: {self._session_id}")
 

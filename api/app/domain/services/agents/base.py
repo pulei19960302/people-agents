@@ -3,17 +3,20 @@
 import asyncio
 import logging
 import uuid
+import json
 from abc import ABC
 from typing import Optional, List, AsyncGenerator, Dict, Any, Callable
 
 from app.domain.external.json_parser import JSONParser
 from app.domain.external.llm import LLM
+from app.domain.models.agent_message import AgentMessage
 from app.domain.models.app_config import AgentConfig
 from app.domain.models.event import ToolEvent, ToolEventStatus, ErrorEvent, MessageEvent, BaseEvent
 from app.domain.models.memory import Memory
 from app.domain.models.message import Message
 from app.domain.models.tool_result import ToolResult
 from app.domain.repositories.uow import IUnitOfWork
+from app.domain.services.context_builder import ContextBuilder
 from app.domain.services.tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -35,6 +38,7 @@ class BaseAgent(ABC):
             llm: LLM,  # 语言模型协议
             json_parser: JSONParser,  # JSON输出解析器
             tools: List[BaseTool],  # 工具列表
+            run_id: str # 运行的id
     ) -> None:
         """构造函数，完成Agent的初始化"""
         self._uow_factory = uow_factory
@@ -45,12 +49,22 @@ class BaseAgent(ABC):
         self._memory: Optional[Memory] = None
         self._json_parser = json_parser
         self._tools = tools
+        self._run_id = run_id
+        self._context_builder = ContextBuilder(
+            uow_factory=uow_factory,
+        )
 
     async def _ensure_memory(self) -> None:
-        """确保智能体记忆是存在的"""
-        if self._memory is None:
-            async with self._uow:
-                self._memory = await self._uow.session.get_memory(self._session_id, self.name)
+        """首次使用Agent时，从数据库重新构建运行上下文。"""
+        if self._memory is not None:
+            return
+
+        self._memory = await self._context_builder.build(
+            session_id=self._session_id,
+            run_id = self._run_id,
+            agent_name=self.name,
+            system_prompt=self._system_prompt,
+        )
 
     def _get_available_tools(self) -> List[Dict[str, Any]]:
         """获取Agent所有可用的工具列表参数声明/Schema"""
@@ -141,23 +155,41 @@ class BaseAgent(ABC):
         # 2.循环最大重试次数后没有结果则将错误作为工具的执行结果，让LLM自行处理
         return ToolResult(success=False, message=err)
 
-    async def _add_to_memory(self, messages: List[Dict[str, Any]]) -> None:
-        """将对应的信息添加到记忆中"""
+    async def _append_messages(self,  messages: list[dict[str, Any]]) -> None:
+        records = [
+            AgentMessage(
+                session_id=self._session_id,
+                run_id=self._run_id,
+                agent_name=self.name,
+                role=message.get("role"),
+                message=message,
+                tool_call_id=message.get("tool_call_id"),
+                token_count=self.estimate_tokens(message),
+            )
+            for message in messages
+        ]
+        async with self._uow:
+            await self._uow.agent_context.append_many(records)
+
+
+    async def _add_to_memory(self, messages: List[dict[str, Any]]) -> None:
+
+        """保存新增消息，并同步更新当前Agent的内存上下文。"""
+
         # 1.先检查确保记忆是存在的
+        if not messages:
+            return
+
         await self._ensure_memory()
 
-        # 2.检查记忆的消息列表是否为空，如果是空则需要添加预设prompt作为初始记忆
-        if self._memory.empty:
-            self._memory.add_message({
-                "role": "system", "content": self._system_prompt,
-            })
+        assert self._memory is not None
 
-        # 3.将正常消息添加到记忆中
+        # 先持久化。数据库失败时，不修改内存，避免两边状态不一致。
+        await self._append_messages(messages)
+
+        # 持久化成功后，再更新当前Agent实例中的Memory。
         self._memory.add_messages(messages)
 
-        # 4.将记忆持久化到数据仓库中
-        async with self._uow:
-            await self._uow.session.save_memory(self._session_id, self.name, self._memory)
 
     async def compact_memory(self) -> None:
         """压缩Agent的记忆"""
@@ -493,3 +525,9 @@ class BaseAgent(ABC):
             )
 
         return True
+
+    # 临时 token 估算
+    @staticmethod
+    def estimate_tokens(message: dict[str, Any]) -> int:
+        raw = json.dumps(message, ensure_ascii=False)
+        return max(1, len(raw) // 3)

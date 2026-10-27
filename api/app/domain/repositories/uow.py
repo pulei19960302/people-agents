@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from typing import TypeVar
 
+from .agent_context_repository import AgentContextRepository
 from .file_repository import FileRepository
 from .session_event_repository import SessionEventRepository
 from .session_repository import SessionRepository
@@ -17,6 +18,7 @@ class IUnitOfWork(ABC):
     session: SessionRepository
     session_event: SessionEventRepository
     session_run: SessionRunRepository
+    agent_context: AgentContextRepository
 
     @abstractmethod
     async def commit(self):
