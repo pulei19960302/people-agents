@@ -17,11 +17,34 @@ from app.domain.external.sandbox import Sandbox
 from app.domain.external.search import SearchEngine
 from app.domain.external.task import TaskRunner, Task
 from app.domain.models.app_config import AgentConfig, MCPConfig, A2AConfig
-from app.domain.models.event import ErrorEvent, Event, MessageEvent, BaseEvent, ToolEvent, ToolEventStatus, \
-    BrowserToolContent, SearchToolContent, ShellToolContent, FileToolContent, MCPToolContent, A2AToolContent, \
-    TitleEvent, WaitEvent, DoneEvent
+from app.domain.models.event import (
+    A2AToolContent,
+    BaseEvent,
+    BrowserToolContent,
+    DoneEvent,
+    ErrorEvent,
+    Event,
+    FileToolContent,
+    MCPToolContent,
+    MessageEvent,
+    PlanEvent,
+    PlanEventStatus,
+    SearchToolContent,
+    ShellToolContent,
+    StepEvent,
+    StepEventStatus,
+    TitleEvent,
+    ToolEvent,
+    ToolEventStatus,
+    WaitEvent,
+)
 from app.domain.models.file import File
 from app.domain.models.message import Message
+from app.domain.models.run_checkpoint import (
+    PendingToolCall,
+    RunCheckpoint,
+    RunCheckpointPhase,
+)
 from app.domain.models.session_event import SessionEvent
 from app.domain.models.search import SearchResults
 from app.domain.models.session_run import SessionRunStatus
@@ -69,6 +92,7 @@ class AgentTaskRunner(TaskRunner):
         self._a2a_tool = A2ATool()
         self._file_storage = file_storage
         self._browser = browser
+        self._checkpoint = RunCheckpoint()
         self._planner_flow = PlannerReActFlow(
             uow_factory=uow_factory,
             llm=llm,
@@ -84,28 +108,163 @@ class AgentTaskRunner(TaskRunner):
             a2a_tool=self._a2a_tool,
         )
 
-    async def _put_and_add_event(self, task: Task, event: Event) -> None:
-        """将事件写入Redis Stream并持久化到session_events表。"""
-        # 1.关联本次Agent运行，保证实时事件和历史事件具有相同的run_id。
-        event.run_id = self._run_id
+    async def _load_checkpoint(self) -> None:
+        """加载当前Run已有的恢复快照。"""
+        uow = self._uow_factory()
+        async with uow:
+            run = await uow.session_run.get_by_id(self._run_id)
 
-        # 2.发送到Redis Stream。
-        # Redis返回的是Stream游标，不要覆盖业务事件event.id。
-        stream_id = await task.output_stream.put(event.model_dump_json())
-        # 3.转换为数据库会话事件。
-        session_event = SessionEvent.from_event(session_id=self._session_id, event=event, run_id=self._run_id)
-        # 4.每次数据库操作创建独立UoW。
+        if run is None or not run.checkpoint:
+            self._checkpoint = RunCheckpoint()
+            return
+
+        try:
+            self._checkpoint = RunCheckpoint.model_validate(run.checkpoint)
+        except Exception:
+            logger.exception(
+                "运行[%s]的checkpoint格式无效，将使用空checkpoint继续",
+                self._run_id,
+            )
+            self._checkpoint = RunCheckpoint()
+
+    def _build_checkpoint(self, event: Event) -> RunCheckpoint | None:
+        """根据已产生的业务事件推进持久化流程快照。"""
+        checkpoint = self._checkpoint.model_copy(deep=True)
+        checkpoint.last_event_id = event.id
+
+        if isinstance(event, PlanEvent):
+            checkpoint.plan_event_id = event.id
+            checkpoint.current_step = None
+            checkpoint.pending_tool_call = None
+            if (
+                event.status == PlanEventStatus.COMPLETED
+                or (
+                    event.status == PlanEventStatus.CREATED
+                    and not event.plan.steps
+                )
+            ):
+                checkpoint.flow_status = RunCheckpointPhase.COMPLETED
+            elif (
+                event.status == PlanEventStatus.UPDATED
+                and event.plan.get_next_step() is None
+            ):
+                checkpoint.flow_status = RunCheckpointPhase.SUMMARIZING
+            else:
+                checkpoint.flow_status = RunCheckpointPhase.EXECUTING
+
+        elif isinstance(event, StepEvent):
+            checkpoint.current_step = event.step.model_copy(deep=True)
+            if event.status == StepEventStatus.STARTED:
+                checkpoint.flow_status = RunCheckpointPhase.EXECUTING
+                if self._checkpoint.flow_status == RunCheckpointPhase.WAITING:
+                    checkpoint.pending_tool_call = None
+            else:
+                checkpoint.flow_status = RunCheckpointPhase.UPDATING
+
+        elif isinstance(event, ToolEvent):
+            if event.status == ToolEventStatus.CALLING:
+                checkpoint.pending_tool_call = PendingToolCall(
+                    tool_call_id=event.tool_call_id,
+                    tool_name=event.tool_name,
+                    function_name=event.function_name,
+                )
+            elif event.function_name == "message_ask_user":
+                checkpoint.pending_tool_call = PendingToolCall(
+                    tool_call_id=event.tool_call_id,
+                    tool_name=event.tool_name,
+                    function_name=event.function_name,
+                    waiting_for_user=True,
+                )
+            elif (
+                checkpoint.pending_tool_call is not None
+                and checkpoint.pending_tool_call.tool_call_id
+                == event.tool_call_id
+            ):
+                checkpoint.pending_tool_call = None
+
+        elif isinstance(event, WaitEvent):
+            checkpoint.flow_status = RunCheckpointPhase.WAITING
+            if (
+                event.tool_call_id is not None
+                and event.tool_name is not None
+                and event.function_name is not None
+            ):
+                checkpoint.pending_tool_call = PendingToolCall(
+                    tool_call_id=event.tool_call_id,
+                    tool_name=event.tool_name,
+                    function_name=event.function_name,
+                    waiting_for_user=True,
+                )
+
+        elif isinstance(event, DoneEvent):
+            checkpoint.flow_status = RunCheckpointPhase.COMPLETED
+            checkpoint.current_step = None
+            checkpoint.pending_tool_call = None
+
+        elif not isinstance(event, ErrorEvent):
+            return None
+
+        self._checkpoint = checkpoint
+        return checkpoint
+
+    @staticmethod
+    def _terminal_status_for_event(
+            event: Event,
+    ) -> SessionRunStatus | None:
+        if isinstance(event, WaitEvent):
+            return SessionRunStatus.WAITING
+        if isinstance(event, ErrorEvent):
+            return SessionRunStatus.FAILED
+        if isinstance(event, DoneEvent):
+            return SessionRunStatus.COMPLETED
+        return None
+
+    async def _put_and_add_event(self, task: Task, event: Event) -> None:
+        """原子持久化事件和断点，再发布到Redis Stream。"""
+        event.run_id = self._run_id
+        session_event = SessionEvent.from_event(
+            session_id=self._session_id,
+            event=event,
+            run_id=self._run_id,
+        )
+        checkpoint = self._build_checkpoint(event)
+        terminal_status = self._terminal_status_for_event(event)
         uow = self._uow_factory()
 
         async with uow:
             await uow.session_event.add(session_event)
+            if checkpoint is not None:
+                await uow.session_run.update_checkpoint(
+                    run_id=self._run_id,
+                    checkpoint=checkpoint,
+                )
+            if terminal_status is not None:
+                await uow.session_run.update_status(
+                    self._run_id,
+                    terminal_status,
+                    error=(event.error if isinstance(event, ErrorEvent) else None),
+                )
+
+        # 数据库提交成功后才发布实时事件。即使Redis发布失败，历史事件和
+        # 恢复断点仍然保持一致，客户端可以通过时间线接口重新读取。
+        try:
+            stream_id = await task.output_stream.put(event.model_dump_json())
+        except Exception:
+            stream_id = None
+            logger.exception(
+                "会话[%s]运行[%s]的事件[%s]已持久化，"
+                "但发布到Redis Stream失败",
+                self._session_id,
+                self._run_id,
+                event.id,
+            )
 
         logger.debug(
             "会话事件保存成功: "
             "session_id=%s, run_id=%s, event_id=%s, "
             "stream_id=%s, event_type=%s",
             self._session_id,
-            task.id,
+            self._run_id,
             event.id,
             stream_id,
             event.type,
@@ -374,8 +533,9 @@ class AgentTaskRunner(TaskRunner):
     async def invoke(self, task: Task) -> None:
         """根据传递的任务处理agent消息队列并运行agent流"""
         try:
-            # 1.确保沙箱、mcp、a2a均初始化完成
+            # 1.恢复Run快照，并确保沙箱、mcp、a2a均初始化完成
             logger.info(f"AgentTaskRunner任务处理开始")
+            await self._load_checkpoint()
             await self._sandbox.ensure_sandbox()
             await self._mcp_tool.initialize(self._mcp_config)
             await self._a2a_tool.initialize(self._a2a_config)
@@ -417,25 +577,18 @@ class AgentTaskRunner(TaskRunner):
                             )
                             await self._uow.session.increment_unread_message_count(self._session_id)
                     elif isinstance(event, WaitEvent):
-                        # 10.如果事件为等待，则更新会话状态并终止程序
-                        async with self._uow:
-                            await self._uow.session_run.update_status(self._run_id, SessionRunStatus.WAITING)
+                        # WaitEvent与WAITING状态已在同一事务中持久化。
                         return
                     elif isinstance(event, ErrorEvent):
-                        # 错误是任务终态。保留Redis Stream，便于排查和恢复。
-                        async with self._uow:
-                            await self._uow.session_run.update_status(self._run_id, SessionRunStatus.FAILED, error=event.error)
+                        # ErrorEvent与FAILED状态已在同一事务中持久化。
                         return
 
                     # 11.判断如果输入消息队列为空则跳出循环
                     if not await task.input_stream.is_empty():
                         break
 
-            # 12.更新会话状态为已完成
-            async with self._uow:
-                await self._uow.session_run.update_status(self._run_id, SessionRunStatus.COMPLETED)
-
-            # SSE正常消费DoneEvent后会立即删除Stream。TTL用于客户端提前
+            # DoneEvent已经与COMPLETED状态原子持久化。SSE正常消费DoneEvent
+            # 后会立即删除Stream。TTL用于客户端提前
             # 断开、没有消费者等场景，避免成功任务的数据永久留在Redis。
             try:
                 await task.input_stream.expire(COMPLETED_STREAM_TTL_SECONDS)
@@ -454,11 +607,9 @@ class AgentTaskRunner(TaskRunner):
                 )
                 raise
         except Exception as e:
-            # 14.记录日志并往任务队列/消息队列中写入异常事件并更新会话状态
+            # ErrorEvent会与FAILED状态在同一事务中持久化。
             logger.exception(f"AgentTaskRunner运行出错: {str(e)}")
             await self._put_and_add_event(task, ErrorEvent(error=f"AgentTaskRunner出错: {str(e)}"))
-            async with self._uow:
-                await self._uow.session_run.update_status(self._run_id, SessionRunStatus.FAILED, error=str(e))
         finally:
             # 在同一个asyncio Task上下文中清理MCP/A2A工具资源
             # 这是关键：streamable_http_client内部使用anyio.create_task_group()，

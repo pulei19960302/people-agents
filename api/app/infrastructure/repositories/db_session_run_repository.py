@@ -4,6 +4,7 @@ from sqlalchemy import select, update, func
 
 from app.domain.models.session_run import SessionRun, utc_now, SessionRunStatus
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.domain.models.run_checkpoint import RunCheckpoint
 from app.domain.repositories.session_run_repository import SessionRunRepository
 from app.infrastructure.models import SessionRunModel
 
@@ -172,20 +173,23 @@ class DBSessionRunRepository(SessionRunRepository):
         )
         await self.db_session.execute(stmt)
 
-    async def update_current_step(
+    async def update_checkpoint(
             self,
             run_id: str,
-            step_id: str | None,
+            checkpoint: RunCheckpoint,
     ) -> None:
         stmt = (
             update(SessionRunModel)
             .where(SessionRunModel.id == run_id)
             .values(
-                current_step_id=step_id,
+                current_step_id=checkpoint.current_step_id,
+                checkpoint=checkpoint.model_dump(mode="json"),
                 updated_at=utc_now(),
             )
         )
-        await self.db_session.execute(stmt)
+        result = await self.db_session.execute(stmt)
+        if result.rowcount != 1:
+            raise ValueError(f"运行[{run_id}]不存在")
 
     async def interrupt_orphaned_runs(self) -> int:
         """中断服务重启后已经失去进程内执行实例的运行。"""

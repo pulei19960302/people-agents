@@ -124,6 +124,9 @@ class ToolEvent(BaseEvent):
 class WaitEvent(BaseEvent):
     """等待事件，等待用户输入确认"""
     type: Literal["wait"] = "wait"
+    tool_call_id: Optional[str] = None
+    tool_name: Optional[str] = None
+    function_name: Optional[str] = None
 
 
 class ErrorEvent(BaseEvent):

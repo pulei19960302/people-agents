@@ -1,6 +1,7 @@
 from typing import Protocol
 from datetime import datetime
 
+from app.domain.models.run_checkpoint import RunCheckpoint
 from app.domain.models.session_run import SessionRun, SessionRunStatus
 
 
@@ -54,11 +55,12 @@ class SessionRunRepository(Protocol):
     ) -> None:
         ...
 
-    async def update_current_step(
+    async def update_checkpoint(
             self,
             run_id: str,
-            step_id: str | None,
+            checkpoint: RunCheckpoint,
     ) -> None:
+        """原子更新当前步骤指针和流程恢复快照。"""
         ...
 
     async def interrupt_orphaned_runs(self) -> int:

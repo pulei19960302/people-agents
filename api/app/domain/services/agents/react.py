@@ -57,7 +57,11 @@ class ReActAgent(BaseAgent):
                         )
                     elif event.status == ToolEventStatus.CALLED:
                         # 7.如果工具事件为已调用，则需要返回等待事件并中断程序
-                        yield WaitEvent()
+                        yield WaitEvent(
+                            tool_call_id=event.tool_call_id,
+                            tool_name=event.tool_name,
+                            function_name=event.function_name,
+                        )
                         return
                     continue
             elif isinstance(event, MessageEvent):

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import logging
-from typing import AsyncGenerator, Optional, Callable, cast
+from typing import AsyncGenerator, Callable, Optional
 
 from app.domain.external.browser import Browser
 from app.domain.external.json_parser import JSONParser
@@ -9,10 +9,21 @@ from app.domain.external.llm import LLM
 from app.domain.external.sandbox import Sandbox
 from app.domain.external.search import SearchEngine
 from app.domain.models.app_config import AgentConfig
-from app.domain.models.event import BaseEvent, PlanEvent, PlanEventStatus, TitleEvent, MessageEvent
-from app.domain.models.event import DoneEvent
+from app.domain.models.event import (
+    BaseEvent,
+    DoneEvent,
+    MessageEvent,
+    PlanEvent,
+    PlanEventStatus,
+    TitleEvent,
+)
 from app.domain.models.message import Message
-from app.domain.models.plan import Plan, ExecutionStatus
+from app.domain.models.plan import Plan, Step, ExecutionStatus
+from app.domain.models.run_checkpoint import (
+    RunCheckpoint,
+    RunCheckpointPhase,
+)
+from app.domain.models.session_run import SessionRun
 from app.domain.services.agents.planner import PlannerAgent
 from app.domain.services.agents.react import ReActAgent
 from app.domain.services.tools.a2a import A2ATool
@@ -23,7 +34,6 @@ from app.domain.services.tools.message import MessageTool
 from app.domain.services.tools.search import SearchTool
 from app.domain.services.tools.shell import ShellTool
 from .base import BaseFlow, FlowStatus
-from ...models.session_event import SessionEvent
 from ...models.session_run import SessionRunStatus
 from ...repositories.uow import IUnitOfWork
 
@@ -95,14 +105,22 @@ class PlannerReActFlow(BaseFlow):
         logger.debug(f"创建执行Agent成功, 会话id: {self._session_id}")
 
 
-    async def _restore_plan(self) -> bool:
-        """根据当前run_id恢复最新Plan。"""
+    async def _restore_plan(
+            self,
+            plan_event_id: str | None = None,
+    ) -> bool:
+        """根据checkpoint指针或当前Run的最新PlanEvent恢复Plan。"""
         uow = self._uow_factory()
         async with uow:
-            session_plan = await uow.session_event.get_last_plan(
-                session_id=self._session_id,
-                run_id=self._run_id,
-            )
+            if plan_event_id is not None:
+                session_plan = await uow.session_event.get_by_event_id(
+                    plan_event_id
+                )
+            else:
+                session_plan = await uow.session_event.get_last_plan(
+                    session_id=self._session_id,
+                    run_id=self._run_id,
+                )
 
         if session_plan is None:
             logger.warning(
@@ -110,6 +128,15 @@ class PlannerReActFlow(BaseFlow):
                 self._run_id,
             )
             return False
+
+        if (
+            session_plan.session_id != self._session_id
+            or session_plan.run_id != self._run_id
+        ):
+            raise RuntimeError(
+                f"PlanEvent[{session_plan.event_id}]不属于当前运行"
+                f"[{self._run_id}]"
+            )
 
         event = session_plan.to_event()
 
@@ -128,6 +155,62 @@ class PlannerReActFlow(BaseFlow):
         )
 
         return True
+
+    async def _restore_checkpoint(
+            self,
+            run: SessionRun,
+    ) -> Step | None:
+        """恢复流程阶段，并用当前Step快照覆盖Plan中的旧状态。"""
+        if not run.checkpoint:
+            restored = await self._restore_plan()
+            self.status = (
+                FlowStatus.EXECUTING
+                if restored
+                else FlowStatus.PLANNING
+            )
+            return None
+
+        checkpoint = RunCheckpoint.model_validate(run.checkpoint)
+        restored = await self._restore_plan(checkpoint.plan_event_id)
+
+        if not restored:
+            self.status = FlowStatus.PLANNING
+            return None
+
+        current_step = checkpoint.current_step
+        if current_step is not None:
+            for index, plan_step in enumerate(self.plan.steps):
+                if plan_step.id == current_step.id:
+                    self.plan.steps[index] = current_step.model_copy(deep=True)
+                    break
+            else:
+                raise RuntimeError(
+                    f"checkpoint中的步骤[{current_step.id}]"
+                    "不在恢复的Plan中"
+                )
+
+        phase_mapping = {
+            RunCheckpointPhase.PLANNING: FlowStatus.PLANNING,
+            RunCheckpointPhase.EXECUTING: FlowStatus.EXECUTING,
+            RunCheckpointPhase.UPDATING: FlowStatus.UPDATING,
+            RunCheckpointPhase.SUMMARIZING: FlowStatus.SUMMARIZING,
+            # 用户回答已经补入工具消息，恢复后重新进入当前Step。
+            RunCheckpointPhase.WAITING: FlowStatus.EXECUTING,
+            RunCheckpointPhase.COMPLETED: FlowStatus.COMPLETED,
+        }
+        self.status = phase_mapping[checkpoint.flow_status]
+
+        if self.status == FlowStatus.UPDATING and current_step is None:
+            raise RuntimeError("UPDATING checkpoint缺少current_step")
+
+        logger.info(
+            "运行[%s]从checkpoint恢复：phase=%s, step=%s, plan_event=%s",
+            self._run_id,
+            checkpoint.flow_status.value,
+            checkpoint.current_step_id,
+            checkpoint.plan_event_id,
+        )
+        return current_step
 
     async def invoke(self, message: Message) -> AsyncGenerator[BaseEvent, None]:
         """传递消息，运行流，在六中调用planner&react智能体组合完成任务并返回对应事件"""
@@ -151,6 +234,9 @@ class PlannerReActFlow(BaseFlow):
             resume_status.value,
         )
 
+        # 恢复UPDATING阶段时，后续需要把当前Step再次传给Planner。
+        step = None
+
         if self._resume_from_status == SessionRunStatus.WAITING:
             planner_resumed = await self.planner.resume_waiting_tool_call(message)
             react_resumed = await self.react.resume_waiting_tool_call(message)
@@ -161,18 +247,11 @@ class PlannerReActFlow(BaseFlow):
                     "但没有找到等待用户回答的工具调用"
                 )
 
-                # 修复同一份历史中其他可能存在的悬空工具调用。
+            # 修复同一份历史中其他可能存在的悬空工具调用。
             await self.planner.repair_incomplete_tool_chain()
             await self.react.repair_incomplete_tool_chain()
 
-
-
-            restored = await self._restore_plan()
-            self.status = (
-                FlowStatus.EXECUTING
-                if restored
-                else FlowStatus.PLANNING
-            )
+            step = await self._restore_checkpoint(run)
 
         elif self._resume_from_status in {
             SessionRunStatus.INTERRUPTED,
@@ -181,12 +260,7 @@ class PlannerReActFlow(BaseFlow):
             await self.planner.repair_incomplete_tool_chain()
             await self.react.repair_incomplete_tool_chain()
 
-            restored = await self._restore_plan()
-            self.status = (
-                FlowStatus.EXECUTING
-                if restored
-                else FlowStatus.PLANNING
-            )
+            step = await self._restore_checkpoint(run)
 
         # 新创建的Run正常进入规划
         else:
@@ -213,9 +287,6 @@ class PlannerReActFlow(BaseFlow):
             )
 
         logger.info(f"Planner&ReAct流接收消息: {message.message[:50]}...")
-
-        # 6.定义当前正在执行的子步骤
-        step = None
 
         # 7.创建死循环执行任务，根据流的不同状态执行不同的操作
         while True:
