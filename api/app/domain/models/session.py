@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 import uuid
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List
 
 from pydantic import BaseModel, Field
 
 from .file import File
-from .memory import Memory
 
 
 class Session(BaseModel):
@@ -19,6 +18,5 @@ class Session(BaseModel):
     latest_message: str = ""  # 最新消息
     latest_message_at: Optional[datetime] = None  # 最新消息时间
     files: List[File] = Field(default_factory=list)  # 文件列表
-    memories: Dict[str, Memory] = Field(default_factory=dict)  # 记忆
     updated_at: datetime = Field(default_factory=datetime.now)  # 更新时间
     created_at: datetime = Field(default_factory=datetime.now)  # 创建时间

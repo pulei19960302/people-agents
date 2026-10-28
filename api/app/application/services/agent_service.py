@@ -159,21 +159,18 @@ class AgentService:
                         f"运行[{resume_run_id}]不属于会话[{session_id}]"
                     )
 
+                # Session级摘要会持续合并后续Run的历史。如果允许恢复旧Run，
+                # 旧任务将读取到在它之后产生的上下文，因此只能恢复最新Run。
+                if latest_run is None or latest_run.id != run.id:
+                    raise RuntimeError(
+                        f"运行[{resume_run_id}]不是会话[{session_id}]的"
+                        "最新运行，Session级上下文模式下只能恢复最新运行"
+                    )
+
                 if not run.status.can_resume:
                     raise RuntimeError(
                         f"运行[{resume_run_id}]当前状态"
                         f"[{run.status.value}]不能恢复"
-                    )
-
-                # 当前Session已经有另一个活动Run时，不允许恢复旧Run。
-                if (
-                        latest_run is not None
-                        and latest_run.id != run.id
-                        and latest_run.status.is_active
-                ):
-                    raise RuntimeError(
-                        f"会话[{session_id}]当前已有运行中的任务"
-                        f"[{latest_run.id}]，不能同时恢复运行[{run.id}]"
                     )
 
                 return run
@@ -184,9 +181,13 @@ class AgentService:
                 await uow.session_run.add(run)
                 return run
 
-            # Agent等待用户回答时，这条消息必须继续进入原Run。
+            # 普通/chat始终表示新请求。回答WAITING问题或恢复旧任务
+            # 必须显式使用/runs/{run_id}/resume，避免新话题误入旧计划。
             if latest_run.status == SessionRunStatus.WAITING:
-                return latest_run
+                await uow.session_run.update_status(
+                    latest_run.id,
+                    SessionRunStatus.CANCELLED,
+                )
 
             # 当前任务还未启动完成或正在执行，拒绝创建第二个Run。
             if latest_run.status in {
@@ -198,7 +199,7 @@ class AgentService:
                     "请等待任务完成后再发送新消息"
                 )
 
-            # COMPLETED、FAILED、INTERRUPTED、CANCELLED后，
+            # WAITING先放弃旧任务；COMPLETED、FAILED、INTERRUPTED、CANCELLED后，
             # 普通聊天消息表示开始新一轮任务。
             run = SessionRun(session_id=session_id)
             await uow.session_run.add(run)
@@ -295,9 +296,8 @@ class AgentService:
                 raise RuntimeError("任务会话不存在, 请核实后重试")
 
             # 获取run的一些方法
-            # 有消息表示发起新任务、回答WAITING任务或恢复指定Run
+            # 普通/chat发起新任务；显式resume接口才恢复旧Run。
             if message:
-                # 感觉这里还需要一些判断。判断当前消息和上一轮的message 有无关联
                 run = await self._resolve_run(session_id=session_id, resume_run_id=resume_run_id)
             else:
                 # 没有消息表示SSE重新连接，不能创建新Run

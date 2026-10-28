@@ -22,7 +22,7 @@ class AgentContextSummaryModel(Base):
     # 删除某个Run时不能删除Session摘要，所以使用SET NULL。
     last_run_id: Mapped[Optional[str]] = mapped_column(
         String(255),
-        ForeignKey("sessions.id", ondelete="SET NULL"),
+        ForeignKey("session_runs.id", ondelete="SET NULL"),
         nullable=True,
     )
 

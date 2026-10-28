@@ -21,6 +21,24 @@ class DBSessionEventRepository(SessionEventRepository):
         record = SessionEventModel.from_domain(event)
         self.db_session.add(record)
 
+    async def count_tool_calls_by_run(self, run_id: str) -> int:
+        stmt = select(func.count()).select_from(SessionEventModel).where(
+            SessionEventModel.run_id == run_id,
+            SessionEventModel.event_type == "tool",
+            SessionEventModel.payload["status"].astext == "calling",
+        )
+        result = await self.db_session.execute(stmt)
+        return result.scalar_one()
+
+    async def count_started_steps_by_run(self, run_id: str) -> int:
+        stmt = select(func.count()).select_from(SessionEventModel).where(
+            SessionEventModel.run_id == run_id,
+            SessionEventModel.event_type == "step",
+            SessionEventModel.payload["status"].astext == "started",
+        )
+        result = await self.db_session.execute(stmt)
+        return result.scalar_one()
+
     async def get_by_session_id(
             self,
             session_id: str,

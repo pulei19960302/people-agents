@@ -47,6 +47,11 @@ class FakeSessionRunRepository:
     async def add(self, run: SessionRun) -> None:
         self._store.runs.append(run)
 
+    async def update_status(self, run_id: str, status: SessionRunStatus) -> None:
+        run = await self.get_by_id(run_id)
+        assert run is not None
+        run.status = status
+
 
 class FakeUnitOfWork:
     def __init__(self, store: RunStore) -> None:
@@ -99,5 +104,82 @@ def test_resolve_run_serializes_concurrent_new_runs() -> None:
         assert "当前任务正在运行" in str(errors[0])
         assert len(store.runs) == 2
         assert store.runs[-1].status == SessionRunStatus.PENDING
+
+    asyncio.run(run_test())
+
+
+def test_resolve_run_rejects_non_latest_run() -> None:
+    async def run_test() -> None:
+        session_id = "session-1"
+        older_run = SessionRun(
+            session_id=session_id,
+            status=SessionRunStatus.FAILED,
+        )
+        latest_run = SessionRun(
+            session_id=session_id,
+            status=SessionRunStatus.COMPLETED,
+        )
+        store = RunStore(runs=[older_run, latest_run])
+
+        service = object.__new__(AgentService)
+        service._uow_factory = lambda: FakeUnitOfWork(store)
+
+        try:
+            await service._resolve_run(
+                session_id=session_id,
+                resume_run_id=older_run.id,
+            )
+        except RuntimeError as exc:
+            assert "只能恢复最新运行" in str(exc)
+        else:
+            raise AssertionError("恢复旧Run时应当抛出RuntimeError")
+
+    asyncio.run(run_test())
+
+
+def test_plain_chat_creates_new_run_after_interruption() -> None:
+    async def run_test() -> None:
+        old_run = SessionRun(
+            session_id="session-1",
+            status=SessionRunStatus.INTERRUPTED,
+        )
+        store = RunStore(runs=[old_run])
+        service = object.__new__(AgentService)
+        service._uow_factory = lambda: FakeUnitOfWork(store)
+
+        new_run = await service._resolve_run("session-1")
+        assert new_run.id != old_run.id
+        assert new_run.status == SessionRunStatus.PENDING
+        assert old_run.status == SessionRunStatus.INTERRUPTED
+
+    asyncio.run(run_test())
+
+
+def test_plain_chat_cancels_waiting_run_before_new_run() -> None:
+    async def run_test() -> None:
+        old_run = SessionRun(session_id="session-1", status=SessionRunStatus.WAITING)
+        store = RunStore(runs=[old_run])
+        service = object.__new__(AgentService)
+        service._uow_factory = lambda: FakeUnitOfWork(store)
+
+        new_run = await service._resolve_run("session-1")
+        assert new_run.id != old_run.id
+        assert old_run.status == SessionRunStatus.CANCELLED
+        assert new_run.status == SessionRunStatus.PENDING
+
+    asyncio.run(run_test())
+
+
+def test_explicit_resume_keeps_waiting_run() -> None:
+    async def run_test() -> None:
+        old_run = SessionRun(session_id="session-1", status=SessionRunStatus.WAITING)
+        store = RunStore(runs=[old_run])
+        service = object.__new__(AgentService)
+        service._uow_factory = lambda: FakeUnitOfWork(store)
+
+        resumed = await service._resolve_run("session-1", resume_run_id=old_run.id)
+        assert resumed.id == old_run.id
+        assert resumed.status == SessionRunStatus.WAITING
+        assert len(store.runs) == 1
 
     asyncio.run(run_test())

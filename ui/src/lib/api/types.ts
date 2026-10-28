@@ -53,6 +53,8 @@ export type LLMConfig = {
  */
 export type AgentConfig = {
   max_iterations?: number;
+  max_plan_steps?: number;
+  max_tool_calls_per_run?: number;
   max_retries?: number;
   max_search_results?: number;
   [key: string]: unknown;

@@ -85,6 +85,7 @@ export function SessionDetailView({
   const [previewFile, setPreviewFile] = useState<AttachmentFile | null>(null);
   const [previewTool, setPreviewTool] = useState<ToolEvent | null>(null);
   const [vncOpen, setVncOpen] = useState(false);
+  const [replyToWaiting, setReplyToWaiting] = useState(false);
   const [initialMessageStarted, setInitialMessageStarted] =
     useState(!hasInitialMessage);
   const initialMessageSentRef = useRef(false);
@@ -178,14 +179,27 @@ export function SessionDetailView({
     async (message: string, uploadedFiles: FileInfo[]) => {
       try {
         const attachmentIds = uploadedFiles.map((f) => f.id);
-        await sendMessage(message, attachmentIds);
+        const resumeRunId = replyToWaiting && session?.status === "waiting"
+          ? session.run_id : null;
+        await sendMessage(message, attachmentIds, resumeRunId ?? undefined);
+        setReplyToWaiting(false);
       } catch (e) {
         toast.error(e instanceof Error ? e.message : "发送失败，请重试");
         throw e;
       }
     },
-    [sendMessage],
+    [sendMessage, session?.status, session?.run_id, replyToWaiting],
   );
+
+  const handleResume = useCallback(async () => {
+    if (!session?.run_id || !session.can_resume ||
+        !["interrupted", "failed"].includes(session.status)) return;
+    try {
+      await sendMessage("继续执行这个任务", [], session.run_id);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "恢复任务失败");
+    }
+  }, [sendMessage, session]);
 
   const handleViewAllFiles = useCallback(() => {
     refreshFiles();
@@ -325,6 +339,29 @@ export function SessionDetailView({
             <div className="shrink-0 bg-background/80 backdrop-blur-sm py-4 relative">
               <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[200px] h-px bg-linear-to-r from-transparent via-[#7c5cf0]/30 to-transparent" />
               <PlanPanel className="mb-2" steps={planSteps} />
+              {session.status === "waiting" && session.can_resume && (
+                <button
+                  type="button"
+                  onClick={() => setReplyToWaiting((value) => !value)}
+                  disabled={streaming}
+                  className="mb-2 rounded-md border px-3 py-1 text-sm disabled:opacity-50"
+                >
+                  {replyToWaiting
+                    ? "正在回复上个任务（点击改为新任务）"
+                    : "回复上个任务（默认发送新任务）"}
+                </button>
+              )}
+              {session.can_resume &&
+                ["interrupted", "failed"].includes(session.status) && (
+                  <button
+                    type="button"
+                    onClick={handleResume}
+                    disabled={streaming}
+                    className="mb-2 rounded-md border px-3 py-1 text-sm disabled:opacity-50"
+                  >
+                    继续上一个任务
+                  </button>
+                )}
               <ChatInput
                 onSend={handleSend}
                 sessionId={sessionId}

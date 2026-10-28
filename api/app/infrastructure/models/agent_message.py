@@ -69,10 +69,14 @@ class AgentMessageModel(Base):
         ),
 
         Index(
-            "ix_agent_messages_session_created_at",
+            "ix_agent_messages_session_agent_active_sequence",
             "session_id",
-            "created_at",
-        )
+            "agent_name",
+            "sequence",
+            postgresql_where=text(
+                "compacted_at IS NULL AND excluded_at IS NULL"
+            ),
+        ),
     )
 
     @classmethod

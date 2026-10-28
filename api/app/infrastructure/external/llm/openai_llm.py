@@ -49,7 +49,16 @@ class OpenAILLM(LLM):
             tools: List[Dict[str, Any]] | None = None,
             response_format: Dict[str, Any] | None = None,
             tool_choice: str | None = None,
+            max_tokens: int | None = None,
     ) -> Dict[str, Any]:
+
+        request_max_tokens = (
+            max_tokens
+            if max_tokens is not None
+            else self._max_tokens
+        )
+
+
         """使用异步OpenAI客户端发起块响应（该步骤可以切换成流式响应）"""
         try:
             # 1.检测是否传递了工具列表
@@ -58,7 +67,7 @@ class OpenAILLM(LLM):
                 response = await self._client.chat.completions.create(
                     model=self._model_name,
                     temperature=self._temperature,
-                    max_tokens=self._max_tokens,
+                    max_tokens=request_max_tokens,
                     messages=messages,
                     response_format=response_format,
                     tools=tools,
@@ -72,7 +81,7 @@ class OpenAILLM(LLM):
                 response = await self._client.chat.completions.create(
                     model=self._model_name,
                     temperature=self._temperature,
-                    max_tokens=self._max_tokens,
+                    max_tokens=request_max_tokens,
                     messages=messages,
                     response_format=response_format,
                     timeout=self._timeout,

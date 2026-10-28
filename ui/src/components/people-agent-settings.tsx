@@ -44,18 +44,18 @@ function CommonSetting({config, onChange}: CommonSettingProps) {
           <FieldLegend className="text-lg font-bold text-foreground">通用配置</FieldLegend>
           <FieldGroup>
             <Field>
-              <FieldLabel htmlFor="max_iterations">最大计划迭代次数</FieldLabel>
+              <FieldLabel htmlFor="max_iterations">Agent 单次最大迭代次数</FieldLabel>
               <Input
                 id="max_iterations"
                 type="number"
                 placeholder="Agent最大迭代次数"
-                value={config.max_iterations ?? 100}
+                value={config.max_iterations ?? 20}
                 onChange={(e) => handleChange('max_iterations', e.target.value)}
                 min={0}
                 max={200}
               />
               <FieldDescription className="text-xs">
-                执行Agent最大能迭代循环调用工具的次数，默认为100
+                执行Agent单次调用的迭代上限，默认 20 次
               </FieldDescription>
             </Field>
             <Field>
@@ -72,6 +72,30 @@ function CommonSetting({config, onChange}: CommonSettingProps) {
               <FieldDescription className="text-xs">
                 默认情况下，最大重试次数为3
               </FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="max_plan_steps">单次任务最大步骤数</FieldLabel>
+              <Input
+                id="max_plan_steps"
+                type="number"
+                value={config.max_plan_steps ?? 5}
+                onChange={(e) => handleChange('max_plan_steps', e.target.value)}
+                min={1}
+                max={100}
+              />
+              <FieldDescription className="text-xs">防止任务被重复规划，默认 5 步</FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="max_tool_calls_per_run">单次任务工具调用上限</FieldLabel>
+              <Input
+                id="max_tool_calls_per_run"
+                type="number"
+                value={config.max_tool_calls_per_run ?? 12}
+                onChange={(e) => handleChange('max_tool_calls_per_run', e.target.value)}
+                min={1}
+                max={500}
+              />
+              <FieldDescription className="text-xs">跨步骤、重启和恢复累计，默认 12 次</FieldDescription>
             </Field>
             <Field>
               <FieldLabel htmlFor="max_search_results">最大搜索结果</FieldLabel>

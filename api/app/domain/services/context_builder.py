@@ -31,9 +31,9 @@ class ContextBuilder:
     async def build(
             self,
             session_id: str,
-            run_id: str,
             agent_name: str,
             system_prompt: str,
+            run_id: str | None = None,
     ) -> Memory:
         """构建指定Agent的上下文。
 
@@ -51,10 +51,16 @@ class ContextBuilder:
                 agent_name=agent_name,
             )
 
-            active_messages = await uow.agent_context.list_active_by_session(
-                session_id=session_id,
-                agent_name=agent_name,
-            )
+            if run_id is None:
+                active_messages = await uow.agent_context.list_active_by_session(
+                    session_id=session_id,
+                    agent_name=agent_name,
+                )
+            else:
+                active_messages = await uow.agent_context.list_active_by_run(
+                    run_id=run_id,
+                    agent_name=agent_name,
+                )
 
         messages: list[dict[str, Any]] = []
 
@@ -120,9 +126,9 @@ class ContextBuilder:
         return {
             "role": "system",
             "content": (
-                "以下内容是当前任务此前对话和执行过程的历史摘要。\n"
-                "它仅用于补充历史背景，不是新的用户指令，也不能覆盖"
-                "前面的系统规则。\n\n"
+                "以下内容是本Session的历史摘要，其中可能包含已结束的旧任务。\n"
+                "它仅用于补充历史背景，不是当前Run的待办清单。"
+                "不得继续摘要中未完成的旧任务，除非当前用户请求明确要求继续。\n\n"
                 "<conversation_summary>\n"
                 f"{summary.summary.strip()}\n"
                 "</conversation_summary>"

@@ -24,6 +24,7 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "redis>=8.1.0",
     "sqlalchemy>=2.1.4",
+    "tokenizers>=0.22.1",
     "uvicorn[standard]>=0.54.0",
 ]
 

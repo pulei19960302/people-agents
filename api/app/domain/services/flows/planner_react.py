@@ -53,6 +53,7 @@ class PlannerReActFlow(BaseFlow):
         self._uow_factory = uow_factory
         self._uow = uow_factory()
         self._session_id = session_id
+        self._agent_config = agent_config
         self.status = FlowStatus.IDLE
         self._run_id = run_id
         self._resume_from_status = resume_from_status
@@ -194,6 +195,23 @@ class PlannerReActFlow(BaseFlow):
         # 防止同一个Flow再次invoke时重复执行恢复操作。
         self._resume_from_status = SessionRunStatus.RUNNING
 
+        # 对恢复任务先读取已经持久化的工具数量；已耗尽额度时
+        # 不再继续旧计划的步骤或重新规划。
+        budget_uow = self._uow_factory()
+        async with budget_uow:
+            initial_tool_calls = await budget_uow.session_event.count_tool_calls_by_run(
+                self._run_id
+            )
+            executed_steps = await budget_uow.session_event.count_started_steps_by_run(
+                self._run_id
+            )
+        if initial_tool_calls >= self._agent_config.max_tool_calls_per_run:
+            raise RuntimeError(
+                "本轮任务工具调用已达到上限"
+                f"({self._agent_config.max_tool_calls_per_run})，"
+                "请开始新任务或缩小任务范围"
+            )
+
         logger.info(f"Planner&ReAct流接收消息: {message.message[:50]}...")
 
         # 6.定义当前正在执行的子步骤
@@ -243,15 +261,17 @@ class PlannerReActFlow(BaseFlow):
                     self.status = FlowStatus.SUMMARIZING
                     continue
 
+                # 规划器可以反复改写未完成步骤，不能只限制数组长度。
+                if executed_steps >= self._agent_config.max_plan_steps:
+                    raise RuntimeError(
+                        f"本次任务执行步骤超过上限({self._agent_config.max_plan_steps})，请缩小任务范围"
+                    )
+                executed_steps += 1
+
                 # 19.调用执行Agent执行对应的步骤
                 logger.info(f"Planner&ReAct流开始执行步骤 {step.id}: {step.description[:50]}...")
                 async for event in self.react.execute_step(self.plan, step, message):
                     yield event
-
-                # 20.压缩执行Agent记忆，避免上下文腐化+消耗大量token
-                logger.info(f"压缩{self.react.name} Agent记忆/上下文")
-                await self.react.compact_memory()
-
                 # 21.将状态更新为updating
                 self.status = FlowStatus.UPDATING
             elif self.status == FlowStatus.UPDATING:

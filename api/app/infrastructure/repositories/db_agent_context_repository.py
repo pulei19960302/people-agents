@@ -45,6 +45,25 @@ class DBAgentContextRepository(AgentContextRepository):
         return [record.to_domain() for record in result.scalars()]
 
 
+    async def list_active_by_run(self, run_id: str, agent_name: str) -> list[AgentMessage]:
+        stmt = (
+            select(AgentMessageModel)
+            .where(
+                AgentMessageModel.run_id == run_id,
+                AgentMessageModel.agent_name == agent_name,
+                AgentMessageModel.compacted_at.is_(None),
+                AgentMessageModel.excluded_at.is_(None),
+            )
+            .order_by(AgentMessageModel.sequence.asc())
+        )
+        result = await self.db_session.execute(stmt)
+
+        return [
+            record.to_domain()
+            for record in result.scalars().all()
+        ]
+
+
     async def list_by_run(self, run_id: str, agent_name: str) -> list[AgentMessage]:
 
         stmt = (
@@ -104,36 +123,18 @@ class DBAgentContextRepository(AgentContextRepository):
         )
 
 
-    async def save_summary(self, summary: AgentContextSummary) -> None:
-        """新增或更新Agent上下文摘要。
-               使用PostgreSQL的INSERT ON CONFLICT实现原子Upsert：
-               - 如果(session_id, agent_name)不存在，则新增摘要；
-               - 如果(session_id, agent_name)已经存在，则更新原来的摘要。
-               使用数据库Upsert能够避免以下并发问题：
-               1. 请求A查询发现摘要不存在；
-               2. 请求B也查询发现摘要不存在；
-               3. A和B同时尝试INSERT；
-               4. 其中一个请求违反唯一约束。
-               冲突更新时保留原记录的：
+    async def save_summary(
+            self,
+            summary: AgentContextSummary,
+            expected_version: int | None,
+    ) -> bool:
+        """使用PostgreSQL Upsert和版本条件原子保存摘要。
 
-               - id；
-               - created_at。
+        首次新增时，唯一键冲突返回False；更新时，只有数据库中的version
+        仍等于expected_version才允许覆盖。这样即使多个Worker同时生成摘要，
+        较晚完成的旧版本也无法覆盖已经提交的新版本。
+        """
 
-               更新以下字段：
-
-               - session_id；
-               - summary；
-               - summarized_through_sequence；
-               - version；
-               - token_count；
-               - updated_at。
-
-               Args:
-                   summary:
-                       需要新增或更新的摘要领域模型。
-               """
-
-        now = datetime.now(timezone.utc)
         insert_stmt = (
             insert(AgentContextSummaryModel)
             .values(
@@ -152,22 +153,35 @@ class DBAgentContextRepository(AgentContextRepository):
             )
         )
 
-        # 使用on_conflict_do_update 将insert 变成upsert。违反约束就行
-        upsert_statement = insert_stmt.on_conflict_do_update(
-            constraint="uq_agent_context_summary_session_agent",
-            set_={
-                "last_run_id": insert_stmt.excluded.last_run_id,
-                "summary": insert_stmt.excluded.summary,
-                "summarized_through_sequence": (
-                    insert_stmt.excluded.summarized_through_sequence
+        if expected_version is None:
+            # 首次创建时发生唯一键冲突，表示另一个任务已抢先写入。
+            save_statement = insert_stmt.on_conflict_do_nothing(
+                constraint="uq_agent_context_summary_session_agent",
+            )
+        else:
+            # 把版本检查与更新合并成一条原子SQL，消除检查后写入竞态。
+            save_statement = insert_stmt.on_conflict_do_update(
+                constraint="uq_agent_context_summary_session_agent",
+                set_={
+                    "last_run_id": insert_stmt.excluded.last_run_id,
+                    "summary": insert_stmt.excluded.summary,
+                    "summarized_through_sequence": (
+                        insert_stmt.excluded.summarized_through_sequence
+                    ),
+                    "version": insert_stmt.excluded.version,
+                    "token_count": insert_stmt.excluded.token_count,
+                    "updated_at": insert_stmt.excluded.updated_at,
+                },
+                where=(
+                    AgentContextSummaryModel.version
+                    == expected_version
                 ),
-                "version": insert_stmt.excluded.version,
-                "token_count": insert_stmt.excluded.token_count,
-                "updated_at": insert_stmt.excluded.updated_at,
-            }
-        )
+            )
 
-        await self.db_session.execute(upsert_statement)
+        result = await self.db_session.execute(
+            save_statement.returning(AgentContextSummaryModel.id)
+        )
+        return result.scalar_one_or_none() is not None
 
 
     async def mark_compacted_through(
@@ -227,6 +241,24 @@ class DBAgentContextRepository(AgentContextRepository):
             )
             .values(
                 compacted_at=compacted_at,
+            )
+        )
+
+        await self.db_session.execute(stmt)
+
+
+    async def mark_excluded(self, message_ids: list[str]) -> None:
+        if not message_ids:
+            return
+
+        stmt = (
+            update(AgentMessageModel)
+            .where(
+                AgentMessageModel.id.in_(message_ids),
+                AgentMessageModel.excluded_at.is_(None),
+            )
+            .values(
+                excluded_at=datetime.now(timezone.utc),
             )
         )
 

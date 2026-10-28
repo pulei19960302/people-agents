@@ -29,7 +29,11 @@ export type UseSessionDetailResult = {
   loadMoreEvents: () => Promise<boolean>;
   refresh: () => Promise<void>;
   refreshFiles: () => Promise<void>;
-  sendMessage: (message: string, attachmentIds: string[]) => Promise<void>;
+  sendMessage: (
+    message: string,
+    attachmentIds: string[],
+    resumeRunId?: string,
+  ) => Promise<void>;
   streaming: boolean;
 };
 
@@ -483,8 +487,14 @@ export function useSessionDetail(
   }, []);
 
   const sendMessage = useCallback(
-    async (message: string, attachmentIds: string[]) => {
+    async (message: string, attachmentIds: string[], resumeRunId?: string) => {
       if (!sessionId) return;
+      // 恢复必须由用户显式指定目标，避免新话题误续旧计划。
+      if (resumeRunId && (
+        session?.run_id !== resumeRunId || session.can_resume !== true
+      )) {
+        throw new Error("当前任务已不可恢复，请刷新会话后重试");
+      }
       stopEmptyStream();
       // 清理已有的消息流连接（如 waiting 状态时用户再次发送）
       if (messageStreamCleanupRef.current) {
@@ -495,12 +505,6 @@ export function useSessionDetail(
       setSkipEmptyStream(false);
       isSendMessageRef.current = true;
       setStreaming(true);
-
-      const shouldResume =
-        session?.can_resume === true &&
-        session.run_id !== null &&
-        ["waiting", "interrupted", "failed"].includes(session.status);
-      const resumeRunId = shouldResume ? session.run_id : null;
 
       // 立即进入运行态，最终状态仍由终止事件后的详情请求校准。
       updateSessionRunState("running", false);

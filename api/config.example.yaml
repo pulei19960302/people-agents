@@ -5,9 +5,18 @@ llm_config:
   temperature: 0.7
   max_tokens: 8192
 agent_config:
-  max_iterations: 100
+  max_iterations: 20
+  max_plan_steps: 5
+  max_tool_calls_per_run: 12
   max_retries: 3
   max_search_results: 10
+  context_compact_threshold_tokens: 24000
+  context_hard_limit_tokens: 32000
+  context_keep_recent_tokens: 8000
+  context_summary_max_tokens: 4000
+  context_summary_max_retries: 2
+  # 当前模型官方tokenizer.json在容器内的路径；为空时使用字符估算
+  context_tokenizer_path: null
 mcp_config:
   mcpServers:
     amap-maps-streamableHTTP:

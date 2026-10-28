@@ -18,9 +18,57 @@ class LLMConfig(BaseModel):
 
 class AgentConfig(BaseModel):
     """Agent通用配置"""
-    max_iterations: int = Field(default=100, gt=0, lt=1000)  # Agent最大迭代次数
+    max_iterations: int = Field(default=20, gt=0, lt=1000)  # 单次Agent调用最大迭代次数
+    max_plan_steps: int = Field(default=5, gt=0, le=100)  # 整轮任务计划的最大步骤数
+    max_tool_calls_per_run: int = Field(default=12, gt=0, le=500)  # 跨步骤及恢复的Run级工具调用上限
     max_retries: int = Field(default=3, gt=1, lt=10)  # 最大重试次数
     max_search_results: int = Field(default=10, gt=1, lt=30)  # 最大搜索结果条数
+
+    # 上下文达到该大小后开始压缩
+    context_compact_threshold_tokens: int = Field(default=24_000, gt=0)
+
+    # 达到硬限制且无法完成压缩时，不再继续请求业务模型
+    context_hard_limit_tokens: int = Field(default=32_000, gt=0)
+
+    # 每次压缩后保留的最近原始消息
+    context_keep_recent_tokens: int = Field(
+        default=8_000,
+        gt=0,
+    )
+
+    # 摘要最大输出长度
+    context_summary_max_tokens: int = Field(
+        default=4_000,
+        gt=0,
+    )
+
+    # 摘要生成使用独立重试次数，避免与业务LLM重试次数相乘
+    context_summary_max_retries: int = Field(default=2, gt=0, le=5)
+
+    # 当前模型官方tokenizer.json的本地路径；为空时使用字符估算
+    context_tokenizer_path: str | None = None
+
+    @model_validator(mode="after")
+    def validate_context_config(self) -> "AgentConfig":
+        if (
+                self.context_keep_recent_tokens
+                >= self.context_compact_threshold_tokens
+        ):
+            raise ValueError(
+                "context_keep_recent_tokens必须小于"
+                "context_compact_threshold_tokens"
+            )
+
+        if (
+                self.context_compact_threshold_tokens
+                >= self.context_hard_limit_tokens
+        ):
+            raise ValueError(
+                "context_compact_threshold_tokens必须小于"
+                "context_hard_limit_tokens"
+            )
+
+        return self
 
 
 class MCPTransport(str, Enum):

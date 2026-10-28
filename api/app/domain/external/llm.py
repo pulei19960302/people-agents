@@ -13,6 +13,7 @@ class LLM(Protocol):
             tools: List[Dict[str, Any]] | None = None,
             response_format: Dict[str, Any] | None = None,
             tool_choice: str| None = None,
+            max_tokens: int | None = None,
     ) -> Dict[str, Any]:
         """传递消息列表、工具列表、响应格式、工具选择策略调用LLM接口"""
         ...
