@@ -351,7 +351,7 @@ class BaseAgent(ABC):
         # 1.需要判断下是否传递了format
         format = format if format else self._format
 
-        logger.info(f"调用之前传递的format={format}")
+        logger.info(f"给大模型传递的query={query}")
 
         # 2.调用语言模型获取响应内容
         message = await self._invoke_llm(

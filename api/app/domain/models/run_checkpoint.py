@@ -8,12 +8,12 @@ from app.domain.models.plan import Step
 class RunCheckpointPhase(str, Enum):
     """PlannerReActFlow可以恢复的持久化阶段。"""
 
-    PLANNING = "planning"
-    EXECUTING = "executing"
-    UPDATING = "updating"
-    SUMMARIZING = "summarizing"
-    WAITING = "waiting"
-    COMPLETED = "completed"
+    PLANNING = "planning" # 正在根据用户问题创建 Plan
+    EXECUTING = "executing" # 表示 ReAct 正在执行 Plan 中某一个 Step
+    UPDATING = "updating" # 当前 Step 已经执行完成或失败，接下来应该交给 Planner 更新 Plan
+    SUMMARIZING = "summarizing" # 表示所有 Step 都已经执行完成，ReAct 正在生成最终回答
+    WAITING = "waiting" # 等待用户回答
+    COMPLETED = "completed" # 完成
 
 
 class PendingToolCall(BaseModel):

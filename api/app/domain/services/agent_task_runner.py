@@ -158,7 +158,13 @@ class AgentTaskRunner(TaskRunner):
                 checkpoint.flow_status = RunCheckpointPhase.EXECUTING
                 if self._checkpoint.flow_status == RunCheckpointPhase.WAITING:
                     checkpoint.pending_tool_call = None
+            elif event.step.success:
+                # 成功步骤不再经过Planner.update_plan()。恢复时先进入
+                # EXECUTING，Flow会从已恢复的Plan中选择下一个未完成步骤；
+                # 如果没有剩余步骤，则会自然转入SUMMARIZING。
+                checkpoint.flow_status = RunCheckpointPhase.EXECUTING
             else:
+                # 只有未成功取得结果的步骤才需要Planner调整后续计划。
                 checkpoint.flow_status = RunCheckpointPhase.UPDATING
 
         elif isinstance(event, ToolEvent):
@@ -227,6 +233,7 @@ class AgentTaskRunner(TaskRunner):
             event=event,
             run_id=self._run_id,
         )
+        # 构建检查点
         checkpoint = self._build_checkpoint(event)
         terminal_status = self._terminal_status_for_event(event)
 

@@ -69,8 +69,10 @@ class PlannerReActFlow(BaseFlow):
         self._resume_from_status = resume_from_status
         self.plan: Optional[Plan] = None
 
-        # 2.初始化Agent预设工具列表
-        tools = [
+        # 2.初始化执行Agent的工具列表。
+        # Planner只负责创建、更新Plan，不执行工具，也不会产生WAITING状态；
+        # 文件、Shell、浏览器、搜索、询问用户等工具统一由ReAct负责调用。
+        react_tools = [
             FileTool(sandbox=sandbox),
             ShellTool(sandbox=sandbox),
             BrowserTool(browser=browser),
@@ -87,7 +89,9 @@ class PlannerReActFlow(BaseFlow):
             agent_config=agent_config,
             llm=llm,
             json_parser=json_parser,
-            tools=tools,
+            # Planner只生成结构化Plan。显式传入空列表，避免规划阶段误调用
+            # message_ask_user或其他执行工具，也让恢复逻辑的职责边界保持清晰。
+            tools=[],
             run_id=run_id
         )
         logger.debug(f"创建规划Agent成功, 会话id: {self._session_id}")
@@ -99,12 +103,13 @@ class PlannerReActFlow(BaseFlow):
             agent_config=agent_config,
             llm=llm,
             json_parser=json_parser,
-            tools=tools,
+            tools=react_tools,
             run_id=run_id
         )
         logger.debug(f"创建执行Agent成功, 会话id: {self._session_id}")
 
 
+    # 恢复plan的方法
     async def _restore_plan(
             self,
             plan_event_id: str | None = None,
@@ -237,20 +242,19 @@ class PlannerReActFlow(BaseFlow):
         # 恢复UPDATING阶段时，后续需要把当前Step再次传给Planner。
         step = None
 
-        # 等待状态
+        # 等待状态只可能由ReAct调用message_ask_user产生。
+        # Planner不持有工具，因此既不需要、也不应该扫描Planner消息历史。
         if self._resume_from_status == SessionRunStatus.WAITING:
-            planner_resumed = await self.planner.resume_waiting_tool_call(message)
             react_resumed = await self.react.resume_waiting_tool_call(message)
 
-            if not planner_resumed and not react_resumed:
+            if not react_resumed:
                 raise RuntimeError(
                     "任务处于WAITING状态，"
                     "但没有找到等待用户回答的工具调用"
                 )
 
-            # 用户回答补入后，检查当前Run末尾是否还存在普通工具中断。
-            await self.planner.repair_interrupted_tool_call()
-            await self.react.repair_interrupted_tool_call()
+            # resume_waiting_tool_call()已经把真实用户回答补成对应的tool消息，
+            # 此时消息链是完整合法的，不应再追加“工具调用被中断”的合成结果。
 
             step = await self._restore_checkpoint(run)
 
@@ -258,8 +262,8 @@ class PlannerReActFlow(BaseFlow):
             SessionRunStatus.INTERRUPTED,
             SessionRunStatus.FAILED,
         }:
-            # 只修复当前Run末尾的悬空普通工具调用，不扫描或改写历史Run。
-            await self.planner.repair_interrupted_tool_call()
+            # 只有ReAct会调用工具，因此只修复ReAct在当前Run末尾留下的
+            # 悬空普通工具调用，不扫描Planner，也不改写历史Run。
             await self.react.repair_interrupted_tool_call()
 
             step = await self._restore_checkpoint(run)
@@ -291,6 +295,11 @@ class PlannerReActFlow(BaseFlow):
         logger.info(f"Planner&ReAct流接收消息: {message.message[:50]}...")
 
         # 7.创建死循环执行任务，根据流的不同状态执行不同的操作
+        """
+            步骤成功 + 还有后续步骤 → 直接执行后续步骤
+            步骤成功 + 没有后续步骤 → 直接总结
+            步骤失败 → 才调用Planner修改后续计划
+        """
         while True:
             if self.status == FlowStatus.PLANNING:
                 # 流状态为规划中，则调用规划Agent
@@ -299,7 +308,7 @@ class PlannerReActFlow(BaseFlow):
                     # 10.判断规划Agent是否返回规划事件
                     if isinstance(event, PlanEvent) and event.status == PlanEventStatus.CREATED:
                         # 11 .创建计划成功时需要更新计划
-                        self.plan = event.plan
+                        self.plan = event.plan  # 保存计划
                         logger.info(f"Planner&ReAct流成功创建计划, 共计: {len(event.plan.steps)} 步")
 
                         # 12.在计划中同步生成了会话标题+初始AI消息
@@ -324,7 +333,7 @@ class PlannerReActFlow(BaseFlow):
                 # 17.获取当前计划的下一个需要执行的子步骤
                 step = self.plan.get_next_step()
 
-                # 18.如果不存在下一个需要执行的自己花，则更新流状态并执行后续步骤
+                # 18.如果不存在下一个需要执行的步骤，则更新流状态
                 if not step:
                     logger.info(f"Planner&ReAct流状态从{FlowStatus.EXECUTING}变成{FlowStatus.SUMMARIZING}")
                     self.status = FlowStatus.SUMMARIZING
@@ -341,8 +350,43 @@ class PlannerReActFlow(BaseFlow):
                 logger.info(f"Planner&ReAct流开始执行步骤 {step.id}: {step.description[:50]}...")
                 async for event in self.react.execute_step(self.plan, step, message):
                     yield event
-                # 21.将状态更新为updating
-                self.status = FlowStatus.UPDATING
+
+                # 21.步骤执行成功时，不需要再让Planner调用一次LLM改写计划。
+                # ReAct直接修改的是Plan中的Step对象，因此这里可以根据更新后的
+                # Plan继续执行下一个未完成步骤；全部完成后直接进入总结阶段。
+                # 只有步骤没有成功取得结果时，才进入UPDATING，让Planner根据
+                # 失败结果调整后续未完成步骤。
+                if step.success:
+
+                    # 这里的PlanEvent只是把当前Plan完整快照持久化，供断点恢复
+                    # 使用，不会调用PlannerAgent或产生额外的LLM请求。如果只在
+                    # checkpoint里保存最后一个current_step，多步骤任务重启后会
+                    # 丢失更早步骤的完成状态。
+                    yield PlanEvent(
+                        status=PlanEventStatus.UPDATED,
+                        plan=self.plan,
+                    )
+
+                    next_step = self.plan.get_next_step()
+                    if next_step is None:
+                        logger.info(
+                            "步骤[%s]执行成功且没有剩余步骤，直接进入总结阶段",
+                            step.id,
+                        )
+                        self.status = FlowStatus.SUMMARIZING
+                    else:
+                        logger.info(
+                            "步骤[%s]执行成功，继续执行下一步骤[%s]",
+                            step.id,
+                            next_step.id,
+                        )
+                        self.status = FlowStatus.EXECUTING
+                else:
+                    logger.info(
+                        "步骤[%s]未成功完成，进入计划更新阶段",
+                        step.id,
+                    )
+                    self.status = FlowStatus.UPDATING
             elif self.status == FlowStatus.UPDATING:
                 # 22.流状态为更新表示需要更新计划
                 logger.info(f"Planner&ReAct流开始更新计划")

@@ -88,24 +88,44 @@ class PlannerAgent(BaseAgent):
                 # 5.将解析对象转换成Plan
                 updated_plan = Plan.model_validate(parsed_obj)
 
-                # 6.拷贝更新计划中的steps，避免造成数据污染
-                new_steps = [Step.model_validate(step) for step in updated_plan.steps]
+                # 6.拷贝Planner返回的后续步骤，避免与解析结果共享可变对象。
+                new_steps = [
+                    Step.model_validate(new_step)
+                    for new_step in updated_plan.steps
+                ]
 
-                # 7.查询旧计划中第一个未完成的计划
-                first_pending_index = None
-                for idx, step in enumerate(plan.steps):
-                    if not step.done:
-                        first_pending_index = idx
-                        break
+                # 7.update_plan()处理的是刚执行完但未成功的当前步骤。
+                # 当前步骤本身属于已经发生的历史，必须保留；Planner返回的
+                # steps只用于替换它后面的未执行部分。不能再依赖“第一个未完成
+                # 步骤”，因为当前失败步骤可能正好是原计划的最后一步，此时旧
+                # 实现会得到None并把Planner生成的补救步骤全部丢弃。
+                current_step_index = next(
+                    (
+                        index
+                        for index, plan_step in enumerate(plan.steps)
+                        if plan_step.id == step.id
+                    ),
+                    None,
+                )
+                if current_step_index is None:
+                    raise RuntimeError(
+                        f"当前步骤[{step.id}]不在Plan[{plan.id}]中，无法更新计划"
+                    )
 
-                # 8.判断是否有未完成的步骤，如果有则执行更新
-                if first_pending_index is not None:
-                    # 9.获取历史已完成的子步骤并更新
-                    updated_steps = plan.steps[:first_pending_index]
-                    updated_steps.extend(new_steps)
+                # 8.保留当前步骤以及它之前的完整执行历史，再替换后续步骤。
+                retained_steps = plan.steps[:current_step_index + 1]
+                updated_steps = [*retained_steps, *new_steps]
 
-                    # 10.更新plan规划
-                    plan.steps = updated_steps
+                # 9.Step ID是前端关联和checkpoint恢复的重要标识，不能允许
+                # Planner返回与历史步骤重复的ID，否则恢复时无法确定对应步骤。
+                step_ids = [plan_step.id for plan_step in updated_steps]
+                if len(step_ids) != len(set(step_ids)):
+                    raise RuntimeError(
+                        "Planner更新计划时产生了重复的Step ID，无法安全保存计划"
+                    )
+
+                # 10.保存更新后的完整计划。
+                plan.steps = updated_steps
 
                 # 11.返回规划更新事件
                 yield PlanEvent(plan=plan, status=PlanEventStatus.UPDATED)

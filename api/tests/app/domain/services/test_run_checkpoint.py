@@ -139,6 +139,54 @@ def test_runner_persists_event_and_checkpoint_before_redis() -> None:
     asyncio.run(check())
 
 
+def test_step_result_selects_matching_recovery_phase() -> None:
+    """成功步骤恢复后继续执行；未成功步骤恢复后才重新规划。"""
+    operations: list[str] = []
+    runner = make_runner(
+        FakeEventRepository(operations),
+        FakeRunRepository(operations),
+        operations,
+    )
+
+    successful_step = Step(
+        id="step-success",
+        description="成功步骤",
+        status=ExecutionStatus.COMPLETED,
+        success=True,
+    )
+    successful_checkpoint = runner._build_checkpoint(
+        StepEvent(
+            step=successful_step,
+            status=StepEventStatus.COMPLETED,
+        )
+    )
+
+    assert successful_checkpoint is not None
+    assert (
+        successful_checkpoint.flow_status
+        == RunCheckpointPhase.EXECUTING
+    )
+
+    unsuccessful_step = Step(
+        id="step-failed",
+        description="未取得结果的步骤",
+        status=ExecutionStatus.COMPLETED,
+        success=False,
+    )
+    unsuccessful_checkpoint = runner._build_checkpoint(
+        StepEvent(
+            step=unsuccessful_step,
+            status=StepEventStatus.COMPLETED,
+        )
+    )
+
+    assert unsuccessful_checkpoint is not None
+    assert (
+        unsuccessful_checkpoint.flow_status
+        == RunCheckpointPhase.UPDATING
+    )
+
+
 def test_wait_event_and_status_are_committed_together() -> None:
     async def check() -> None:
         operations: list[str] = []
