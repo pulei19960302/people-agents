@@ -229,10 +229,13 @@ class AgentTaskRunner(TaskRunner):
         )
         checkpoint = self._build_checkpoint(event)
         terminal_status = self._terminal_status_for_event(event)
+
+        # 创建新的事物
         uow = self._uow_factory()
 
         async with uow:
             await uow.session_event.add(session_event)
+
             if checkpoint is not None:
                 await uow.session_run.update_checkpoint(
                     run_id=self._run_id,
@@ -243,6 +246,22 @@ class AgentTaskRunner(TaskRunner):
                     self._run_id,
                     terminal_status,
                     error=(event.error if isinstance(event, ErrorEvent) else None),
+                )
+
+                # 4.同步Session标题
+            if isinstance(event, TitleEvent):
+                await uow.session.update_title(
+                    self._session_id,
+                    event.title,
+                )
+
+            # 5.同步Session最新消息
+            elif isinstance(event, MessageEvent):
+
+                await uow.session.update_latest_message_and_increment_unread(
+                    self._session_id,
+                    event.message,
+                    event.created_at
                 )
 
         # 数据库提交成功后才发布实时事件。即使Redis发布失败，历史事件和
@@ -563,27 +582,12 @@ class AgentTaskRunner(TaskRunner):
                     # 7.将得到的事件添加到消息队列中
                     await self._put_and_add_event(task, event)
 
-                    # 8.如果事件类型为标题事件则更新会话标题
-                    if isinstance(event, TitleEvent):
-                        async with self._uow:
-                            await self._uow.session.update_title(self._session_id, event.title)
-                    elif isinstance(event, MessageEvent):
-                        # 9.如果事件为消息事件，则更新最新消息并新增未读消息数
-                        async with self._uow:
-                            await self._uow.session.update_latest_message(
-                                self._session_id,
-                                event.message,
-                                event.created_at,
-                            )
-                            await self._uow.session.increment_unread_message_count(self._session_id)
-                    elif isinstance(event, WaitEvent):
+                    if isinstance(event, (WaitEvent, ErrorEvent)):
                         # WaitEvent与WAITING状态已在同一事务中持久化。
-                        return
-                    elif isinstance(event, ErrorEvent):
                         # ErrorEvent与FAILED状态已在同一事务中持久化。
                         return
 
-                    # 11.判断如果输入消息队列为空则跳出循环
+                    # 判断如果输入消息队列为空则跳出循环
                     if not await task.input_stream.is_empty():
                         break
 

@@ -189,6 +189,22 @@ class DBSessionRepository(SessionRepository):
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
 
+    async def update_latest_message_and_increment_unread(self, session_id: str, message: str, timestamp: datetime) -> None:
+        stmt = (
+            update(SessionModel)
+            .where(SessionModel.id == session_id)
+            .values(
+                latest_message=message,
+                latest_message_at=timestamp,
+                unread_message_count=func.coalesce(SessionModel.unread_message_count, 0) + 1,
+            )
+        )
+        result = await self.db_session.execute(stmt)
+
+        # 2.检查是否更新成功
+        if result.rowcount == 0:
+            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+
     async def increment_unread_message_count(self, session_id: str) -> None:
         """新增会话的未读消息数"""
         # 1.构建新增未读消息数语句并更新

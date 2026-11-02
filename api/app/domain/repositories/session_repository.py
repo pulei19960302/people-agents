@@ -46,6 +46,9 @@ class SessionRepository(Protocol):
         """根据传递的信息更新未读消息数"""
         ...
 
+    async def update_latest_message_and_increment_unread(self, session_id: str, message: str, timestamp: datetime) -> None:
+        ...
+
     async def increment_unread_message_count(self, session_id: str) -> None:
         """根据传递的会话id新增未读消息数"""
         ...
