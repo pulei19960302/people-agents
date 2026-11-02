@@ -18,6 +18,14 @@ class AgentContextRepository(Protocol):
         """读取当前Run尚未压缩、尚未排除的消息。"""
         ...
 
+    async def get_last_active_by_run(
+            self,
+            run_id: str,
+            agent_name: str,
+    ) -> AgentMessage | None:
+        """读取当前Run最后一条尚未压缩、尚未排除的消息。"""
+        ...
+
     async def list_by_run(self, run_id: str, agent_name: str) -> list[AgentMessage]:
         """查询指定Run的消息，用于恢复和调试。"""
         ...

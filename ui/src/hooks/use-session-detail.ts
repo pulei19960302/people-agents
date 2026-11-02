@@ -67,7 +67,7 @@ export function useSessionDetail(
   const startEmptyStreamRef = useRef<() => void>(() => undefined);
   const messageStreamCleanupRef = useRef<(() => void) | null>(null);
   const isSendMessageRef = useRef(false);
-  const lastEventIdRef = useRef<string | null>(null);
+  const lastStreamCursorRef = useRef<string | null>(null);
   const sessionStatusRef = useRef<Session["status"] | null>(null);
   const loadingMoreEventsRef = useRef(false);
   const activeSessionIdRef = useRef(sessionId);
@@ -128,8 +128,10 @@ export function useSessionDetail(
         if (normalized) evToAppend = normalized;
       }
 
-      const eventId = (evToAppend.data as { event_id?: string })?.event_id;
-      if (eventId) lastEventIdRef.current = eventId;
+      const streamCursor = (
+        evToAppend.data as { stream_cursor?: string }
+      )?.stream_cursor;
+      if (streamCursor) lastStreamCursorRef.current = streamCursor;
 
       const eventRunId = (evToAppend.data as { run_id?: string })?.run_id;
       if (eventRunId) {
@@ -226,7 +228,7 @@ export function useSessionDetail(
     }
     emptyStreamCleanupRef.current = sessionApi.chat(
       sessionId,
-      { event_id: lastEventIdRef.current || undefined },
+      { stream_cursor: lastStreamCursorRef.current || undefined },
       (ev) => {
         emptyStreamRetryCountRef.current = 0;
         appendEvent(ev);
@@ -338,12 +340,6 @@ export function useSessionDetail(
       }
       setLoadMoreError(null);
 
-      if (normalized.length > 0) {
-        const lastEvId = (
-          normalized[normalized.length - 1]?.data as { event_id?: string }
-        )?.event_id;
-        if (lastEvId) lastEventIdRef.current = lastEvId;
-      }
     } catch (e) {
       setError(e instanceof Error ? e : new Error("加载失败"));
     } finally {
@@ -426,6 +422,7 @@ export function useSessionDetail(
 
   useEffect(() => {
     loadedSessionIdRef.current = null;
+    lastStreamCursorRef.current = null;
 
     if (!sessionId) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -505,6 +502,8 @@ export function useSessionDetail(
       setSkipEmptyStream(false);
       isSendMessageRef.current = true;
       setStreaming(true);
+      // 新消息可能创建新的Redis Stream，不能沿用上一Task的游标。
+      lastStreamCursorRef.current = null;
 
       // 立即进入运行态，最终状态仍由终止事件后的详情请求校准。
       updateSessionRunState("running", false);

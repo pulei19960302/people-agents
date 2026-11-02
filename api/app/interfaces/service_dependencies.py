@@ -96,7 +96,7 @@ def get_agent_service() -> AgentService:
         mcp_config=app_config.mcp_config,
         a2a_config=app_config.a2a_config,
         sandbox_cls=DockerSandbox,
-        task_cls=RedisStreamTask,
+        stream_task_cls=RedisStreamTask,
         json_parser=RepairJSONParser(),
         search_engine=BingSearchEngine(),
         file_storage=file_storage,

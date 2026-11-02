@@ -2,6 +2,8 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
+import pytest
+
 from app.domain.models.agent_context_summary import AgentContextSummary
 from app.domain.models.agent_message import AgentMessage
 from app.domain.models.app_config import AgentConfig
@@ -123,6 +125,14 @@ class FakeAgentContextRepository:
                 and item.excluded_at is None
             )
         ]
+
+    async def get_last_active_by_run(
+        self,
+        run_id: str,
+        agent_name: str,
+    ) -> AgentMessage | None:
+        records = await self.list_active_by_run(run_id, agent_name)
+        return records[-1] if records else None
 
     async def get_summary(
         self,
@@ -533,7 +543,7 @@ def test_roll_back_excludes_unfinished_non_user_tool_call() -> None:
     asyncio.run(run_test())
 
 
-def test_repair_excludes_non_tail_broken_tool_chain() -> None:
+def test_repair_does_not_rewrite_non_tail_history() -> None:
     async def run_test() -> None:
         repository = FakeAgentContextRepository(
             messages=[
@@ -566,24 +576,25 @@ def test_repair_excludes_non_tail_broken_tool_chain() -> None:
         )
         agent = make_agent(repository)
 
-        repaired = await agent.repair_incomplete_tool_chain()
+        repaired = await agent.repair_interrupted_tool_call()
 
-        assert repaired is True
+        # 正常恢复只检查当前Run末尾，不在请求链路里扫描和改写历史脏数据。
+        assert repaired is False
         broken = next(
             item for item in repository.messages
             if item.id == "broken"
         )
-        assert broken.excluded_at is not None
+        assert broken.excluded_at is None
         active = await repository.list_active_by_session(
             "session-1",
             "react",
         )
-        assert [item.id for item in active] == ["later"]
+        assert [item.id for item in active] == ["broken", "later"]
 
     asyncio.run(run_test())
 
 
-def test_repair_appends_synthetic_result_for_tail_tool_call() -> None:
+def test_repair_interrupted_tool_call_appends_synthetic_result() -> None:
     async def run_test() -> None:
         repository = FakeAgentContextRepository(
             messages=[
@@ -610,12 +621,94 @@ def test_repair_appends_synthetic_result_for_tail_tool_call() -> None:
         )
         agent = make_agent(repository)
 
-        repaired = await agent.repair_incomplete_tool_chain()
+        repaired = await agent.repair_interrupted_tool_call()
 
         assert repaired is True
         assert repository.messages[-1].role == "tool"
         assert repository.messages[-1].tool_call_id == "call-tail"
         assert "可能已经执行" in repository.messages[-1].message["content"]
+
+    asyncio.run(run_test())
+
+
+def test_repair_interrupted_tool_call_rejects_parallel_calls() -> None:
+    async def run_test() -> None:
+        repository = FakeAgentContextRepository(
+            messages=[
+                make_message(
+                    message_id="parallel-tail",
+                    sequence=1,
+                    role="assistant",
+                    message={
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "browser_navigate",
+                                    "arguments": "{}",
+                                },
+                            },
+                            {
+                                "id": "call-2",
+                                "type": "function",
+                                "function": {
+                                    "name": "shell_exec",
+                                    "arguments": "{}",
+                                },
+                            },
+                        ],
+                    },
+                )
+            ]
+        )
+        agent = make_agent(repository)
+
+        # 当前系统明确采用单工具协议。遇到不符合协议的历史数据时，
+        # 恢复逻辑必须停止，不能擅自猜测两个调用的执行状态。
+        with pytest.raises(RuntimeError, match="多个tool_calls"):
+            await agent.repair_interrupted_tool_call()
+
+        assert len(repository.messages) == 1
+
+    asyncio.run(run_test())
+
+
+def test_repair_interrupted_tool_call_rejects_waiting_user_call() -> None:
+    async def run_test() -> None:
+        repository = FakeAgentContextRepository(
+            messages=[
+                make_message(
+                    message_id="waiting-tail",
+                    sequence=1,
+                    role="assistant",
+                    message={
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "ask-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "message_ask_user",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ],
+                    },
+                )
+            ]
+        )
+        agent = make_agent(repository)
+
+        # message_ask_user只能使用真实用户回答恢复。普通中断恢复不能
+        # 生成假的tool结果，否则模型会误以为用户已经回答。
+        with pytest.raises(RuntimeError, match="未按WAITING状态恢复"):
+            await agent.repair_interrupted_tool_call()
+
+        assert len(repository.messages) == 1
 
     asyncio.run(run_test())
 

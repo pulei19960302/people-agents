@@ -190,6 +190,7 @@ export type CreateSessionParams = {
 export type BaseSSEEventData = {
   event_id?: string;
   run_id?: string;
+  stream_cursor?: string;
   created_at?: number | string;
 };
 
@@ -211,6 +212,7 @@ export type ChatMessage = BaseSSEEventData & {
 export type ChatParams = {
   message?: string;
   attachments?: string[];
+  stream_cursor?: string;
   [key: string]: unknown;
 };
 

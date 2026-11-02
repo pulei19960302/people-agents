@@ -49,6 +49,7 @@ class BaseEventData(BaseModel):
 
     event_id: Optional[str] = None
     run_id: Optional[str] = None
+    stream_cursor: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
 
     # 这里只影响 JSON 序列化结果，不会把模型实例中的 created_at 改成 int。
@@ -71,6 +72,7 @@ class BaseEventData(BaseModel):
         return {
             "event_id": event.id,
             "run_id": event.run_id,
+            "stream_cursor": event.stream_cursor,
             "created_at": int(event.created_at.timestamp()),
         }
 

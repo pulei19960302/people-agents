@@ -35,7 +35,8 @@ class ChatRequest(BaseModel):
     """聊天请求结构"""
     message: Optional[str] = None  # 人类消息
     attachments: Optional[List[str]] = Field(default_factory=list)  # 附件列表(传递的是文件id列表)
-    event_id: Optional[str] = None  # 最新事件id
+    event_id: Optional[str] = None  # 兼容旧客户端的业务事件id，不能直接作为Redis游标
+    stream_cursor: Optional[str] = None  # Redis Stream游标，用于SSE断线重连
     timestamp: Optional[int] = None  # 当前时间戳
 
 
@@ -86,5 +87,6 @@ class ShellReadResponse(BaseModel):
 class ResumeRunRequest(BaseModel):
     message: str = "继续执行这个任务"
     attachments: list[str] = Field(default_factory=list)
-    event_id: str | None = None
+    event_id: str | None = None  # 兼容旧客户端
+    stream_cursor: str | None = None
     timestamp: int | None = None

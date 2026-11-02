@@ -237,6 +237,7 @@ class PlannerReActFlow(BaseFlow):
         # 恢复UPDATING阶段时，后续需要把当前Step再次传给Planner。
         step = None
 
+        # 等待状态
         if self._resume_from_status == SessionRunStatus.WAITING:
             planner_resumed = await self.planner.resume_waiting_tool_call(message)
             react_resumed = await self.react.resume_waiting_tool_call(message)
@@ -247,9 +248,9 @@ class PlannerReActFlow(BaseFlow):
                     "但没有找到等待用户回答的工具调用"
                 )
 
-            # 修复同一份历史中其他可能存在的悬空工具调用。
-            await self.planner.repair_incomplete_tool_chain()
-            await self.react.repair_incomplete_tool_chain()
+            # 用户回答补入后，检查当前Run末尾是否还存在普通工具中断。
+            await self.planner.repair_interrupted_tool_call()
+            await self.react.repair_interrupted_tool_call()
 
             step = await self._restore_checkpoint(run)
 
@@ -257,8 +258,9 @@ class PlannerReActFlow(BaseFlow):
             SessionRunStatus.INTERRUPTED,
             SessionRunStatus.FAILED,
         }:
-            await self.planner.repair_incomplete_tool_chain()
-            await self.react.repair_incomplete_tool_chain()
+            # 只修复当前Run末尾的悬空普通工具调用，不扫描或改写历史Run。
+            await self.planner.repair_interrupted_tool_call()
+            await self.react.repair_interrupted_tool_call()
 
             step = await self._restore_checkpoint(run)
 
@@ -290,12 +292,8 @@ class PlannerReActFlow(BaseFlow):
 
         # 7.创建死循环执行任务，根据流的不同状态执行不同的操作
         while True:
-            # 8.如果流的状态为空闲，则只需要将状态修改为规划中
-            if self.status == FlowStatus.IDLE:
-                logger.info(f"Planner&ReAct流状态从{FlowStatus.IDLE}变成{FlowStatus.PLANNING}")
-                self.status = FlowStatus.PLANNING
-            elif self.status == FlowStatus.PLANNING:
-                # 9.流状态为规划中，则调用规划Agent
+            if self.status == FlowStatus.PLANNING:
+                # 流状态为规划中，则调用规划Agent
                 logger.info(f"Planner&ReAct流开始创建计划/Plan")
                 async for event in self.planner.create_plan(message):
                     # 10.判断规划Agent是否返回规划事件
@@ -315,7 +313,7 @@ class PlannerReActFlow(BaseFlow):
                 logger.info(f"Planner&ReAct流状态从{FlowStatus.PLANNING}变成{FlowStatus.EXECUTING}")
                 self.status = FlowStatus.EXECUTING
 
-                # 15.判断计划是否生成，步骤是否正常
+                # 判断计划是否生成，步骤是否正常
                 if not self.plan or len(self.plan.steps) == 0:
                     logger.info(f"Planner&ReAct流创建计划失败或无子步骤")
                     self.status = FlowStatus.COMPLETED

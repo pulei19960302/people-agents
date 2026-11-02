@@ -200,7 +200,7 @@ async def chat(
                 session_id=session_id,
                 message=request.message,
                 attachments=request.attachments,
-                latest_event_id=request.event_id,
+                stream_cursor=request.stream_cursor,
                 timestamp=datetime.fromtimestamp(request.timestamp) if request.timestamp else None,
         ):
             # 2.将Agent事件转换为sse数据(因为普通的event没法通过流式事件传输)
@@ -439,7 +439,7 @@ async def resume_session_run(
                 session_id=session_id,
                 message=request.message,
                 attachments=request.attachments,
-                latest_event_id=request.event_id,
+                stream_cursor=request.stream_cursor,
                 timestamp=(
                         datetime.fromtimestamp(request.timestamp)
                         if request.timestamp

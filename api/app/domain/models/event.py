@@ -37,6 +37,9 @@ class BaseEvent(BaseModel):
     """基础事件类型"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))  # 事件id
     run_id: Optional[str] = None  # 所属的一次Agent任务运行ID
+    # Redis Stream游标只用于SSE断线重连，不属于业务事件内容，
+    # 因此不写入Redis消息和session_events.payload。
+    stream_cursor: Optional[str] = Field(default=None, exclude=True)
     type: Literal[""] = ""  # 事件的类型
     created_at: datetime = Field(default_factory=datetime.now)  # 事件创建时间
 

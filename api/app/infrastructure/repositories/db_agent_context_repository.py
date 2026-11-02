@@ -63,6 +63,27 @@ class DBAgentContextRepository(AgentContextRepository):
             for record in result.scalars().all()
         ]
 
+    async def get_last_active_by_run(
+            self,
+            run_id: str,
+            agent_name: str,
+    ) -> AgentMessage | None:
+        """按sequence倒序读取当前Run最后一条有效消息。"""
+        stmt = (
+            select(AgentMessageModel)
+            .where(
+                AgentMessageModel.run_id == run_id,
+                AgentMessageModel.agent_name == agent_name,
+                AgentMessageModel.compacted_at.is_(None),
+                AgentMessageModel.excluded_at.is_(None),
+            )
+            .order_by(AgentMessageModel.sequence.desc())
+            .limit(1)
+        )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        return record.to_domain() if record is not None else None
+
 
     async def list_by_run(self, run_id: str, agent_name: str) -> list[AgentMessage]:
 

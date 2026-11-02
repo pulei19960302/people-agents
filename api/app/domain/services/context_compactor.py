@@ -517,8 +517,9 @@ class ContextCompactor:
         对于assistant.tool_calls，必须保证每个tool_call_id都存在对应的
         tool消息，否则该消息链尚未完成，不能进入历史摘要。
 
-        孤立tool消息同样不能直接压缩，应先由
-        repair_incomplete_tool_chain()修复或排除。
+        孤立tool消息同样不能直接压缩。正常恢复链路只会通过
+        repair_interrupted_tool_call()补齐当前Run末尾的悬空调用；历史脏数据
+        不在压缩阶段自动改写，因此遇到非法消息块时停止继续选择。
         """
 
         if not block:

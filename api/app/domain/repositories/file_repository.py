@@ -15,3 +15,7 @@ class FileRepository(Protocol):
     async def get_by_id(self, file_id: str) -> Optional[File]:
         """根据传递的文件id获取文件信息"""
         ...
+
+    async def get_by_ids(self, file_ids: list[str]) -> list[File]:
+        """批量获取文件，并保持调用方传入的顺序。"""
+        ...

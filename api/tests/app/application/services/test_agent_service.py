@@ -1,7 +1,11 @@
 import asyncio
 from dataclasses import dataclass, field
 
-from app.application.services.agent_service import AgentService
+from app.application.services.agent_service import (
+    AgentService,
+    RunClaimConflictError,
+)
+from app.domain.models.event import DoneEvent, ErrorEvent
 from app.domain.models.session_run import SessionRun, SessionRunStatus
 
 
@@ -181,5 +185,104 @@ def test_explicit_resume_keeps_waiting_run() -> None:
         assert resumed.id == old_run.id
         assert resumed.status == SessionRunStatus.WAITING
         assert len(store.runs) == 1
+
+    asyncio.run(run_test())
+
+
+class FakeOutputStream:
+    def __init__(self, event_json: str) -> None:
+        self.event_json = event_json
+        self.start_ids: list[str | None] = []
+
+    async def get(
+            self,
+            start_id: str | None = None,
+            block_ms: int | None = None,
+    ) -> tuple[str, str]:
+        self.start_ids.append(start_id)
+        return "1793150000000-0", self.event_json
+
+
+class FakeStreamTask:
+    def __init__(self, event_json: str) -> None:
+        self.output_stream = FakeOutputStream(event_json)
+        self.done = False
+
+
+def test_read_task_events_uses_and_returns_redis_cursor() -> None:
+    async def run_test() -> None:
+        service = object.__new__(AgentService)
+        stream_task = FakeStreamTask(
+            DoneEvent(run_id="run-1").model_dump_json()
+        )
+        run = SessionRun(id="run-1", session_id="session-1")
+
+        events = [
+            event
+            async for event in service._read_stream_task_events(
+                session_id="session-1",
+                run=run,
+                stream_task=stream_task,
+                stream_cursor="1793140000000-0",
+            )
+        ]
+
+        assert stream_task.output_stream.start_ids == ["1793140000000-0"]
+        assert len(events) == 1
+        assert events[0].stream_cursor == "1793150000000-0"
+        # stream_cursor只用于SSE响应，不能写回Redis中的业务事件JSON。
+        assert "stream_cursor" not in events[0].model_dump_json()
+
+    asyncio.run(run_test())
+
+
+def test_invalid_business_event_id_is_not_used_as_redis_cursor() -> None:
+    assert AgentService._normalize_stream_cursor(
+        "48c12d0b-6348-4e0a-9666-613d31a7c157"
+    ) is None
+
+
+def test_claim_conflict_does_not_persist_failed_run() -> None:
+    async def run_test() -> None:
+        service = object.__new__(AgentService)
+        run = SessionRun(
+            id="run-1",
+            session_id="session-1",
+            status=SessionRunStatus.WAITING,
+        )
+        persisted_errors: list[ErrorEvent] = []
+
+        async def get_session(_session_id: str) -> object:
+            return object()
+
+        async def resolve_run(**_kwargs: object) -> SessionRun:
+            return run
+
+        async def create_stream_task(**_kwargs: object) -> None:
+            raise RunClaimConflictError("运行[run-1]已经由其他请求启动")
+
+        async def persist_error(**kwargs: object) -> None:
+            persisted_errors.append(kwargs["error_event"])  # type: ignore[arg-type]
+
+        service._get_session = get_session
+        service._resolve_run = resolve_run
+        service._get_stream_task = lambda _run: None
+        service._create_stream_task = create_stream_task
+        service._persist_orchestration_error = persist_error
+
+        events = [
+            event
+            async for event in service.chat(
+                session_id="session-1",
+                message="继续",
+                resume_run_id="run-1",
+            )
+        ]
+
+        assert len(events) == 1
+        assert isinstance(events[0], ErrorEvent)
+        assert "其他请求启动" in events[0].error
+        assert persisted_errors == []
+        assert run.status == SessionRunStatus.WAITING
 
     asyncio.run(run_test())

@@ -42,3 +42,22 @@ class DBFileRepository(FileRepository):
 
         # 2.判断文件记录是否存在返回不同的值
         return record.to_domain() if record is not None else None
+
+    async def get_by_ids(self, file_ids: list[str]) -> list[File]:
+        """批量获取文件，并保持调用方传入的顺序。"""
+        if not file_ids:
+            return []
+
+        # 一次查询取回全部文件，避免附件数量增加时产生N+1查询。
+        stmt = select(FileModel).where(FileModel.id.in_(set(file_ids)))
+        result = await self.db_session.execute(stmt)
+        records_by_id = {
+            record.id: record.to_domain()
+            for record in result.scalars().all()
+        }
+
+        return [
+            records_by_id[file_id]
+            for file_id in file_ids
+            if file_id in records_by_id
+        ]
