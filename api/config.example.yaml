@@ -7,7 +7,7 @@ llm_config:
 agent_config:
   max_iterations: 20
   max_plan_steps: 5
-  max_tool_calls_per_run: 12
+  max_tool_calls_per_run: 36
   max_retries: 3
   max_search_results: 10
   context_compact_threshold_tokens: 24000

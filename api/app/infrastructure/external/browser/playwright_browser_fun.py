@@ -1,51 +1,36 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# 获取页面的课时内容js代码
+# 提取已加载的页面正文（包括视口之外的内容）。
+# 保留原常量名供浏览器实现引用；交互元素仍由下方脚本按可见视口提取。
 GET_VISIBLE_CONTENT_FUNC = """() => {
-    // 1.定义变量存储所有可视元素+视口宽高
-    const visibleElements = [];
-    const viewportHeight = window.innerHeight;
-    const viewportWeight = window.innerWidth;
+    if (!document.body) return '';
 
-    // 2.获取页面上所有元素
-    const elements = document.querySelectorAll("body *");
-
-    // 3.循环遍历所有元素逐个处理
-    for (let i = 0; i < elements.length; i++) {
-        // 4.获取元素的尺寸与位置
-        const element = elements[i];
-        const rect = element.getBoundingClientRect();
-
-        // 5.判断元素的宽高，如果没有大小则跳过
-        if (rect.height === 0 || rect.width === 0) continue;
-
-        // 6.排除完全在当前屏幕可视区域之外的元素(上方、下方、左侧、右侧)的元素
-        if (
-            rect.bottom < 0 ||
-            rect.top > viewportHeight ||
-            rect.right < 0 ||
-            rect.left > viewportWeight
-        ) continue;
-
-        // 7.通用样式判断当前元素是否隐藏
+    // 优先提取正文容器，避免文档站的大量导航占满内容上限。
+    const isVisible = (element) => {
         const style = window.getComputedStyle(element);
-        if (
-            style.display === 'none' || // 块隐藏
-            style.visibility === 'hidden' || // 隐藏不可见
-            style.opacity === '0' // 透明度为0
-        ) continue;
+        return !element.hidden && element.getAttribute('aria-hidden') !== 'true'
+            && style.display !== 'none' && style.visibility !== 'hidden'
+            && style.opacity !== '0';
+    };
+    const roots = [...document.querySelectorAll('main, [role="main"], article')];
+    const root = roots.find(element => isVisible(element) && element.innerText.trim())
+        || document.body;
+    const ignoredTags = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'SVG', 'CANVAS']);
 
-        // 8.如果element是文本节点或有意义的元素，请将其添加到结果中
-        if (
-            element.innerText ||
-            element.tagName === "IMG" ||
-            element.tagName === "INPUT" ||
-            element.tagName === "BUTTON"
-        ) visibleElements.push(element.outerHTML)
+    // 每个节点只复制一次，不将父节点outerHTML与其子节点再次拼接。
+    // 保留表格、标题、链接结构；不修改真实DOM，页面交互索引不受影响。
+    function copyReadable(node) {
+        if (node.nodeType === Node.TEXT_NODE) return node.cloneNode();
+        if (node.nodeType !== Node.ELEMENT_NODE) return null;
+        if (ignoredTags.has(node.tagName) || !isVisible(node)) return null;
+        const copy = node.cloneNode(false);
+        for (const child of node.childNodes) {
+            const readable = copyReadable(child);
+            if (readable) copy.appendChild(readable);
+        }
+        return copy;
     }
-
-    // 9.将所有内容使用空格拼接后包裹在div内返回
-    return '<div>' + visibleElements.join(' ') + '</div>'
+    return copyReadable(root)?.outerHTML || '';
 }"""
 
 # 获取页面可交互元素js代码

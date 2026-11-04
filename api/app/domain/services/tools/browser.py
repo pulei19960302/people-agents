@@ -28,7 +28,7 @@ class BrowserTool(BaseTool):
 
     @tool(
         name="browser_navigate",
-        description="将浏览器导航至指定网址，当需要访问新页面时使用。",
+        description="访问指定网址，返回当前URL、页面正文和可见交互元素。正文已满足需求时直接使用，无需重复调用browser_view。",
         parameters={
             "url": {
                 "type": "string",

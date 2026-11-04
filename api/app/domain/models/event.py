@@ -11,6 +11,7 @@ from .file import File
 from .plan import Plan, Step
 from .search import SearchResultItem
 from .tool_result import ToolResult
+from .run_checkpoint import RunStopReason
 
 # 很多event
 class PlanEventStatus(str, Enum):
@@ -136,6 +137,8 @@ class ErrorEvent(BaseEvent):
     """错误事件"""
     type: Literal["error"] = "error"
     error: str = ""  # 错误信息
+    # 用于内部恢复决策，前端仍可沿用现有error字符串展示。
+    stop_reason: RunStopReason = RunStopReason.EXECUTION_ERROR
 
 
 class DoneEvent(BaseEvent):

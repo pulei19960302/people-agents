@@ -4,6 +4,7 @@ import logging
 from typing import AsyncGenerator, Callable, Optional
 
 from app.domain.external.browser import Browser
+from app.domain.exceptions import RunBudgetExceeded
 from app.domain.external.json_parser import JSONParser
 from app.domain.external.llm import LLM
 from app.domain.external.sandbox import Sandbox
@@ -22,6 +23,7 @@ from app.domain.models.plan import Plan, Step, ExecutionStatus
 from app.domain.models.run_checkpoint import (
     RunCheckpoint,
     RunCheckpointPhase,
+    RunStopReason,
 )
 from app.domain.models.session_run import SessionRun
 from app.domain.services.agents.planner import PlannerAgent
@@ -184,9 +186,20 @@ class PlannerReActFlow(BaseFlow):
 
         current_step = checkpoint.current_step
         if current_step is not None:
+            # 只重新激活EXECUTING阶段尚未完成的当前步骤。业务失败的
+            # UPDATING快照必须保留，已成功完成的Step也不能重复执行。
+            if checkpoint.flow_status == RunCheckpointPhase.EXECUTING and (
+                current_step.status in {ExecutionStatus.RUNNING, ExecutionStatus.FAILED}
+                or (checkpoint.stop_reason == RunStopReason.BUDGET_EXHAUSTED
+                    and not current_step.success)
+            ):
+                current_step.status = ExecutionStatus.RUNNING
+                current_step.error = None
+                current_step.success = False
             for index, plan_step in enumerate(self.plan.steps):
                 if plan_step.id == current_step.id:
-                    self.plan.steps[index] = current_step.model_copy(deep=True)
+                    current_step = current_step.model_copy(deep=True)
+                    self.plan.steps[index] = current_step
                     break
             else:
                 raise RuntimeError(
@@ -285,11 +298,14 @@ class PlannerReActFlow(BaseFlow):
             executed_steps = await budget_uow.session_event.count_started_steps_by_run(
                 self._run_id
             )
+        # checkpoint中正在执行的Step已经计入持久化用量。
+        # 恢复它不新增步骤；后续真正的新Step仍受原有上限约束。
+        resumed_step_id = step.id if step is not None and step.status == ExecutionStatus.RUNNING else None
         if initial_tool_calls >= self._agent_config.max_tool_calls_per_run:
-            raise RuntimeError(
+            raise RunBudgetExceeded(
                 "本轮任务工具调用已达到上限"
                 f"({self._agent_config.max_tool_calls_per_run})，"
-                "请开始新任务或缩小任务范围"
+                "请调整额度后继续，或开始新任务；恢复不会清零已有用量"
             )
 
         logger.info(f"Planner&ReAct流接收消息: {message.message[:50]}...")
@@ -340,11 +356,13 @@ class PlannerReActFlow(BaseFlow):
                     continue
 
                 # 规划器可以反复改写未完成步骤，不能只限制数组长度。
-                if executed_steps >= self._agent_config.max_plan_steps:
+                if step.id != resumed_step_id and executed_steps >= self._agent_config.max_plan_steps:
                     raise RuntimeError(
                         f"本次任务执行步骤超过上限({self._agent_config.max_plan_steps})，请缩小任务范围"
                     )
-                executed_steps += 1
+                if step.id != resumed_step_id:
+                    executed_steps += 1
+                resumed_step_id = None
 
                 # 19.调用执行Agent执行对应的步骤
                 logger.info(f"Planner&ReAct流开始执行步骤 {step.id}: {step.description[:50]}...")
@@ -382,6 +400,15 @@ class PlannerReActFlow(BaseFlow):
                         )
                         self.status = FlowStatus.EXECUTING
                 else:
+                    # 无工具收尾可能返回success=false。这表示额度不足，
+                    # 不应继续让Planner生成无法执行的检索/补救步骤。
+                    async with self._uow_factory() as budget_uow:
+                        used = await budget_uow.session_event.count_tool_calls_by_run(self._run_id)
+                    if used >= self._agent_config.max_tool_calls_per_run:
+                        raise RunBudgetExceeded(
+                            f"本轮任务工具调用已达到上限({self._agent_config.max_tool_calls_per_run})，"
+                            "已保留当前步骤结果；请调整额度后继续，或开始新任务"
+                        )
                     logger.info(
                         "步骤[%s]未成功完成，进入计划更新阶段",
                         step.id,

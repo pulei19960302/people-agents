@@ -5,7 +5,7 @@ import logging
 from typing import Optional, List, Any
 
 from markdownify import markdownify
-from playwright.async_api import async_playwright, Playwright, Browser, Page
+from playwright.async_api import async_playwright, Playwright, Browser, Page, TimeoutError as PlaywrightTimeoutError
 
 from app.domain.external.browser import Browser as BrowserProtocol
 from app.domain.external.llm import LLM
@@ -39,42 +39,44 @@ class PlaywrightBrowser(BrowserProtocol):
 
     async def _ensure_browser(self) -> None:
         """确保浏览器存在，如果不存在则初始化"""
-        if not self.browser or not self.page:
+        if not self.browser or not self.browser.is_connected():
             if not await self.initialize():
                 raise Exception("初始化Playwright浏览器失败")
 
     async def _ensure_page(self) -> None:
-        """确保浏览器页面存在，如果不存在则新建"""
+        """复用当前上下文中最近的非空页面；只有没有可用标签页时才新建。"""
         # 1.先保证浏览器存在
         await self._ensure_browser()
 
-        # 2.如果页面不存在则创建新上下文+页面
-        if not self.page:
-            self.page = await self.browser.new_page()  # 等同于self.browser.new_context().new_page()
+        # 2.连接恢复时从现有上下文选择页面；已连接时保留所属上下文，
+        # 不跳到其他上下文。点击打开新页面后仍可跟随最新非空标签页。
+        if self.page and not self.page.is_closed():
+            contexts = [self.page.context]
         else:
-            # 3.如果页面存在则提取所有上下文
             contexts = self.browser.contexts
-            if contexts:
-                # 4.获取默认上下文及页面
-                default_context = contexts[0]
-                pages = default_context.pages
-
-                # 5.判断页面是否存在
-                if pages:
-                    # 6.获取当前最新页面(Chrome浏览器新增页面时，默认往右侧添加，相当于pages中序号较大的页面)
-                    latest_page = pages[-1]
-
-                    # 7.判断当前页面是否为最新页面，如果不是则更新
-                    if self.page != latest_page:
-                        self.page = latest_page
+        pages = [page for context in contexts for page in context.pages if not page.is_closed()]
+        blank_urls = {"", "about:blank", "chrome://newtab/", "chrome://new-tab-page/"}
+        readable_pages = [page for page in pages if page.url not in blank_urls]
+        if readable_pages or pages:
+            # 避免新建的空白页盖过恢复前已经打开的资料页。
+            self.page = (readable_pages or pages)[-1]
+        else:
+            context = contexts[0] if contexts else await self.browser.new_context()
+            self.page = await context.new_page()
 
     async def _extract_content(self) -> str:
         """提取当前页面内容"""
-        # 1.使用js代码获取当前页面可见元素内容
+        # 1.提取已加载正文，不逐个拼接父子节点，避免同一段文字重复出现。
         visible_content = await self.page.evaluate(GET_VISIBLE_CONTENT_FUNC)
 
         # 2.使用markdownify这个库将html文档转换为markdown
         markdown_content = markdownify(visible_content)
+
+        # 部分页面仅包含纯文本；HTML正文提取为空时再尝试一次可见文本。
+        if not markdown_content.strip():
+            markdown_content = await self.page.locator("body").inner_text(timeout=5000)
+        if not markdown_content.strip():
+            return ""
 
         # 3.模型上下文长度有限，提取最大不超过50k个字符
         max_content_length = min(len(markdown_content), 50000)
@@ -92,7 +94,7 @@ class PlaywrightBrowser(BrowserProtocol):
                     "content": markdown_content[:max_content_length],
                 }
             ])
-            return response.get("content", "")
+            return response.get("content") or markdown_content[:max_content_length]
         else:
             return markdown_content[:max_content_length]
 
@@ -195,34 +197,18 @@ class PlaywrightBrowser(BrowserProtocol):
                 self.playwright = await async_playwright().start()
                 self.browser = await self.playwright.chromium.connect_over_cdp(self.cdp_url)
 
-                # 4.获取浏览器的所有上下文
-                contexts = self.browser.contexts
-
-                # 5.如果上下文存在，并且第一个上下文只有一个页面则执行如下逻辑
-                if contexts and len(contexts[0].pages) == 1:
-                    # 6.获取当前上下文的第一个页面
-                    page = contexts[0].pages[0]
-
-                    # 7.判断当前页面是不是空页面，如果是则直接使用page，否则新建一个
-                    if (
-                            page.url == "about:blank" or
-                            page.url == "chrome://newtab/" or
-                            page.url == "chrome://new-tab-page/" or
-                            not page.url
-                    ):
-                        self.page = page
-                    else:
-                        # 8.当前页面已经有数据则新建一个页面
-                        self.page = await contexts[0].new_page()
-                else:
-                    # 9.上下文不存在或者页面不唯一则表示数据被污染，新建一个页面
-                    context = contexts[0] if contexts else await self.browser.new_context()
-                    self.page = await context.new_page()
+                # 4.恢复已有页面，而不是把非空页面视作污染并新建空白页。
+                # CDP连接来自当前Session的沙箱；不在不同沙箱间共享页面。
+                self.page = None
+                await self._ensure_page()
 
                 return True
             except Exception as e:
-                # 10.清除所有资源
-                await self.cleanup()
+                # 5.连接失败只释放本地Playwright连接，保留沙箱标签页供重试。
+                # cleanup()用于显式重启，会关闭远程页面，此处不能使用。
+                if self.playwright:
+                    await self.playwright.stop()
+                self.page = self.browser = self.playwright = None
 
                 # 11.判断重试次数是否等于最大重试次数
                 if attempt == max_retries - 1:
@@ -301,12 +287,13 @@ class PlaywrightBrowser(BrowserProtocol):
             # 2.在跳转之前先将可交互元素的缓存清空
             self.page.interactive_elements_cache = []
 
-            # 3.使用goto进行跳转
-            await self.page.goto(url)
-            return ToolResult(
-                success=True,
-                data={"interactive_elements": await self._extract_interactive_elements()}
-            )
+            # 3.DOM就绪即可读取正文，不因广告、统计等资源未加载完而超时。
+            response = await self.page.goto(url, wait_until="domcontentloaded")
+            result = await self._read_page()
+            if response is not None and response.status >= 400:
+                result.success = False
+                result.message = f"页面返回HTTP {response.status}，返回内容可能是错误页，不能作为目标资料"
+            return result
         except Exception as e:
             # 返回错误的工具结果
             return ToolResult(success=False, message=f"浏览器导航到[{url}]失败: {str(e)}")
@@ -316,17 +303,29 @@ class PlaywrightBrowser(BrowserProtocol):
         # 1.确保页面存在
         await self._ensure_page()
 
-        # 2.等待页面加载完成
-        await self.wait_for_page_load()
+        # 2.等待DOM可用。超时仍可尝试读取已呈现的内容，但标明可能不完整。
+        load_timed_out = False
+        try:
+            await self.page.wait_for_load_state("domcontentloaded", timeout=15000)
+        except PlaywrightTimeoutError:
+            load_timed_out = True
+        result = await self._read_page()
+        if load_timed_out:
+            result.message = "页面加载超时，内容可能不完整。" + result.message
+        return result
 
-        # 3.更新页面的可交互元素
+    async def _read_page(self) -> ToolResult:
+        """导航与查看共用的正文结果，URL帮助模型识别空白页或重定向。"""
         interactive_elements = await self._extract_interactive_elements()
-
-        # 4.返回工具结果
+        content = await self._extract_content()
         return ToolResult(
-            success=True,
+            success=bool(content.strip()),
+            message=("" if content.strip() else "未提取到页面正文，请检查当前URL和页面状态；不能视为已经读取资料"),
             data={
-                "content": await self._extract_content(),
+                "url": self.page.url,
+                "title": await self.page.title(),
+                "content": content,
+                "content_truncated": len(content) >= 50000,
                 "interactive_elements": interactive_elements,
             }
         )

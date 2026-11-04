@@ -31,7 +31,9 @@ class DBSessionEventRepository(SessionEventRepository):
         return result.scalar_one()
 
     async def count_started_steps_by_run(self, run_id: str) -> int:
-        stmt = select(func.count()).select_from(SessionEventModel).where(
+        # 同一个Step在中断恢复后会再次产生started事件，只占一个步骤名额。
+        step_id = SessionEventModel.payload["step"]["id"].astext
+        stmt = select(func.count(func.distinct(step_id))).select_from(SessionEventModel).where(
             SessionEventModel.run_id == run_id,
             SessionEventModel.event_type == "step",
             SessionEventModel.payload["status"].astext == "started",

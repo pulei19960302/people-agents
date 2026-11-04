@@ -3,6 +3,8 @@
 import logging
 from typing import AsyncGenerator
 
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
+
 from app.domain.models.event import (
     StepEventStatus,
     StepEvent,
@@ -23,11 +25,51 @@ from .base import BaseAgent
 logger = logging.getLogger(__name__)
 
 
+class _StepResult(BaseModel):
+    """模型只负责提供业务结果，Step的ID和执行状态由程序维护。
+
+    只读取当前Prompt约定的三个必填字段；模型额外返回的status等
+    字段不能写入Step，避免incomplete_partial这类自造状态影响执行。
+    缺少业务字段时必须纠正输出，不能用默认值悄悄丢掉已有结果。
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    success: StrictBool
+    result: StrictStr
+    attachments: list[StrictStr]
+
+
 class ReActAgent(BaseAgent):
     """基于ReAct架构的执行Agent"""
     name: str = "react"
     _system_prompt: str = SYSTEM_PROMPT + REACT_SYSTEM_PROMPT
     _format: str = "json_object"  # format控制的是content、工具调用控制的是tool_calls两者不冲突
+
+    async def _parse_step_result(self, content: str) -> _StepResult:
+        """结果不符合协议时只纠正一次，不重新执行任务或调用工具。"""
+        try:
+            return _StepResult.model_validate(await self._json_parser.invoke(content))
+        except ValueError as exc:
+            logger.warning("步骤结果不符合约定，将进行一次无工具格式纠正: %s", exc)
+
+        # 原回复已在BaseAgent中保存进上下文，这里只要求转换格式。
+        # 不让模型重新执行工具，也不根据status猜测success，避免把部分结果变成成功。
+        response = await self._invoke_llm(
+            [{"role": "user", "content": (
+                "上一条步骤回复不符合返回协议。只将上一条已有结果转换为JSON对象，"
+                "必须且仅包含success（布尔值）、result（字符串）、attachments（字符串数组）。"
+                "不要调用工具、检索或补做任务，不得添加status字段或Markdown代码围栏。"
+                "未完成、仅部分完成或无法核实的步骤必须success=false；"
+                "将已有可靠结果及未完成原因保留在result中，attachments只保留已生成的文件。"
+            )}],
+            self._format,
+            tools_enabled=False,
+        )
+        if response.get("tool_calls"):
+            raise ValueError("步骤结果格式纠正时不允许调用工具")
+        return _StepResult.model_validate(
+            await self._json_parser.invoke(response.get("content") or "")
+        )
 
     async def execute_step(self, plan: Plan, step: Step, message: Message) -> AsyncGenerator[BaseEvent, None]:
         """根据传递的消息+规划+子步骤，执行相应的子步骤"""
@@ -41,6 +83,7 @@ class ReActAgent(BaseAgent):
 
         # 2.更新步骤的执行状态为运行中并返回Step事件
         step.status = ExecutionStatus.RUNNING
+        step.error = None  # 新尝试保留已有结果，清除上一次执行错误。
         yield StepEvent(step=step, status=StepEventStatus.STARTED)
 
         # 3.调用invoke获取agent返回的事件内容
@@ -65,12 +108,10 @@ class ReActAgent(BaseAgent):
                         return
                     continue
             elif isinstance(event, MessageEvent):
-                # 8.返回消息事件，意味着content有内容，content有内容则代表执行Agent已运行完毕
+                # 8.先解析业务结果，不能把模型输出直接当作完整Step。
+                # 校验成功后再结束步骤，模型无权通过status改写流程状态。
+                new_step = await self._parse_step_result(event.message)
                 step.status = ExecutionStatus.COMPLETED
-
-                # 9.message中输出的数据结构为json，需要提取并解析
-                parsed_obj = await self._json_parser.invoke(event.message)
-                new_step = Step.model_validate(parsed_obj)
 
                 # 10.更新子步骤的数据
                 step.success = new_step.success
@@ -91,6 +132,9 @@ class ReActAgent(BaseAgent):
 
                 # 14.返回子步骤对应事件
                 yield StepEvent(step=step, status=StepEventStatus.FAILED)
+                yield event
+                # 即使调用方继续消费生成器，也不能再把失败Step改成completed。
+                return
 
             # 15.其他场景将事件直接返回
             yield event

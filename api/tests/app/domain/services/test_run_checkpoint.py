@@ -1,7 +1,12 @@
 import asyncio
+from unittest.mock import AsyncMock
+from types import SimpleNamespace
+
+import pytest
 
 from app.domain.models.event import (
     DoneEvent,
+    ErrorEvent,
     PlanEvent,
     PlanEventStatus,
     StepEvent,
@@ -12,12 +17,14 @@ from app.domain.models.plan import ExecutionStatus, Plan, Step
 from app.domain.models.run_checkpoint import (
     RunCheckpoint,
     RunCheckpointPhase,
+    RunStopReason,
 )
 from app.domain.models.session_event import SessionEvent
 from app.domain.models.session_run import SessionRun, SessionRunStatus
 from app.domain.services.agent_task_runner import AgentTaskRunner
 from app.domain.services.flows.base import FlowStatus
 from app.domain.services.flows.planner_react import PlannerReActFlow
+from app.domain.exceptions import RunBudgetExceeded
 
 
 class FakeEventRepository:
@@ -304,4 +311,113 @@ def test_flow_restores_updating_step_from_checkpoint() -> None:
         assert flow.plan is not None
         assert flow.plan.steps[0].result == "已完成"
 
+    asyncio.run(check())
+
+
+def test_failed_step_event_keeps_execution_phase_and_error_is_atomic():
+    async def check():
+        operations = []
+        events, runs = FakeEventRepository(operations), FakeRunRepository(operations)
+        runner = make_runner(events, runs, operations)
+        step = Step(id="same-step", status=ExecutionStatus.FAILED, error="LLM 503")
+        runner._build_checkpoint(StepEvent(step=step, status=StepEventStatus.FAILED))
+        await runner._put_and_add_event(FakeTask(operations), ErrorEvent(error="LLM 503"))
+        assert operations == ["event", "checkpoint", "status", "commit", "redis"]
+        assert runs.status == SessionRunStatus.FAILED
+        assert runs.checkpoint.flow_status == RunCheckpointPhase.EXECUTING
+        assert runs.checkpoint.current_step_id == "same-step"
+        assert runs.checkpoint.stop_reason == RunStopReason.EXECUTION_ERROR
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("phase", [
+    RunCheckpointPhase.PLANNING, RunCheckpointPhase.UPDATING,
+    RunCheckpointPhase.SUMMARIZING,
+])
+def test_execution_exception_does_not_change_non_execution_phase(phase):
+    runner = make_runner(FakeEventRepository([]), FakeRunRepository([]), [])
+    runner._checkpoint = RunCheckpoint(flow_status=phase)
+    checkpoint = runner._build_checkpoint(ErrorEvent(error="请求超时"))
+    assert checkpoint.flow_status == phase
+    assert checkpoint.stop_reason == RunStopReason.EXECUTION_ERROR
+
+
+@pytest.mark.parametrize("phase,step_status,reason,expected", [
+    (RunCheckpointPhase.EXECUTING, ExecutionStatus.FAILED, RunStopReason.EXECUTION_ERROR, ExecutionStatus.RUNNING),
+    (RunCheckpointPhase.EXECUTING, ExecutionStatus.RUNNING, RunStopReason.INTERRUPTED, ExecutionStatus.RUNNING),
+    (RunCheckpointPhase.EXECUTING, ExecutionStatus.COMPLETED, RunStopReason.BUDGET_EXHAUSTED, ExecutionStatus.RUNNING),
+    (RunCheckpointPhase.UPDATING, ExecutionStatus.COMPLETED, RunStopReason.EXECUTION_ERROR, ExecutionStatus.COMPLETED),
+    # 旧数据没有stop_reason，仍按明确记录的UPDATING恢复，不猜测错误原因。
+    (RunCheckpointPhase.UPDATING, ExecutionStatus.FAILED, None, ExecutionStatus.FAILED),
+])
+def test_restore_reactivates_only_current_execution_step(phase, step_status, reason, expected):
+    async def check():
+        flow = object.__new__(PlannerReActFlow)
+        flow._run_id = "run-1"
+        done = Step(id="done", status=ExecutionStatus.COMPLETED, success=True)
+        current = Step(id="same-step", status=step_status, error="旧错误", result="已有资料")
+        flow.plan = Plan(steps=[done, Step(id=current.id), Step(id="next")])
+        flow._restore_plan = AsyncMock(return_value=True)
+        checkpoint = RunCheckpoint(flow_status=phase, current_step=current, stop_reason=reason)
+        run = SessionRun(id="run-1", session_id="session-1", checkpoint=checkpoint.model_dump(mode="json"))
+        restored = await flow._restore_checkpoint(run)
+        assert restored is flow.plan.steps[1]
+        assert restored.id == "same-step" and restored.status == expected
+        assert restored.result == "已有资料"
+        assert flow.plan.steps[0] is done and done.success
+        assert len(flow.plan.steps) == 3
+        assert flow.status.value == phase.value
+        if expected == ExecutionStatus.RUNNING:
+            assert restored.error is None
+            assert flow.plan.get_next_step() is restored
+        else:
+            assert restored.error == "旧错误"
+    asyncio.run(check())
+
+
+def test_budget_partial_result_is_resumable_without_replanning():
+    runner = make_runner(FakeEventRepository([]), FakeRunRepository([]), [])
+    partial = Step(id="same-step", status=ExecutionStatus.COMPLETED, success=False, result="部分资料")
+    runner._build_checkpoint(StepEvent(step=partial, status=StepEventStatus.COMPLETED))
+    checkpoint = runner._build_checkpoint(ErrorEvent(
+        error="额度已耗尽", stop_reason=RunStopReason.BUDGET_EXHAUSTED,
+    ))
+    assert checkpoint.flow_status == RunCheckpointPhase.EXECUTING
+    assert checkpoint.stop_reason == RunStopReason.BUDGET_EXHAUSTED
+    assert checkpoint.current_step.result == "部分资料"
+    checkpoint = runner._build_checkpoint(StepEvent(
+        step=partial.model_copy(update={"status": ExecutionStatus.RUNNING}),
+        status=StepEventStatus.STARTED,
+    ))
+    assert checkpoint.stop_reason is None
+
+
+@pytest.mark.parametrize("exception,reason,status", [
+    (RuntimeError("LLM 503"), RunStopReason.EXECUTION_ERROR, SessionRunStatus.FAILED),
+    (RunBudgetExceeded("额度耗尽"), RunStopReason.BUDGET_EXHAUSTED, SessionRunStatus.FAILED),
+    (asyncio.CancelledError(), RunStopReason.INTERRUPTED, SessionRunStatus.INTERRUPTED),
+])
+def test_runner_records_typed_stop_reason(exception, reason, status):
+    async def check():
+        operations = []
+        events, runs = FakeEventRepository(operations), FakeRunRepository(operations)
+        runner = make_runner(events, runs, operations)
+        runner._uow = runner._uow_factory()
+        runner._checkpoint = RunCheckpoint(
+            flow_status=RunCheckpointPhase.EXECUTING,
+            current_step=Step(id="same-step", status=ExecutionStatus.RUNNING),
+        )
+        runner._load_checkpoint = AsyncMock()
+        runner._cleanup_tools = AsyncMock()
+        runner._sandbox = SimpleNamespace(ensure_sandbox=AsyncMock(side_effect=exception))
+        if isinstance(exception, asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError):
+                await runner.invoke(FakeTask(operations))
+        else:
+            await runner.invoke(FakeTask(operations))
+        assert runs.checkpoint.stop_reason == reason
+        assert runs.checkpoint.flow_status == RunCheckpointPhase.EXECUTING
+        assert runs.checkpoint.current_step_id == "same-step"
+        assert runs.status == status
+        runner._cleanup_tools.assert_awaited_once()
     asyncio.run(check())

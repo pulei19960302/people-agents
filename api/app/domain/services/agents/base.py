@@ -14,6 +14,7 @@ from app.domain.models.event import ToolEvent, ToolEventStatus, ErrorEvent, Mess
 from app.domain.models.memory import Memory
 from app.domain.models.message import Message
 from app.domain.models.tool_result import ToolResult
+from app.domain.models.run_checkpoint import RunStopReason
 from app.domain.repositories.uow import IUnitOfWork
 from app.domain.services.context_builder import ContextBuilder
 from app.domain.services.context_compactor import ContextCompactor
@@ -126,7 +127,13 @@ class BaseAgent(ABC):
             used = await uow.session_event.count_tool_calls_by_run(self._run_id)
         return used >= self._agent_config.max_tool_calls_per_run
 
-    async def _invoke_llm(self, messages: List[Dict[str, Any]], format: Optional[str] = None) -> Dict[str, Any]:
+    async def _invoke_llm(
+            self,
+            messages: List[Dict[str, Any]],
+            format: Optional[str] = None,
+            *,
+            tools_enabled: bool = True,
+    ) -> Dict[str, Any]:
         """调用语言模型并处理记忆内容"""
 
 
@@ -151,7 +158,8 @@ class BaseAgent(ABC):
             self.name == "react"
             and await self._tool_budget_exhausted()
         )
-        available_tools = [] if budget_exhausted else self._get_available_tools()
+        # 输出格式纠正只能整理已经取得的结果，不能再次执行外部工具。
+        available_tools = [] if budget_exhausted or not tools_enabled else self._get_available_tools()
         llm_messages = self._memory.get_messages()
         if budget_exhausted:
             llm_messages = [
@@ -173,7 +181,7 @@ class BaseAgent(ABC):
                         messages=llm_messages,
                         tools=available_tools,
                         response_format=response_format,
-                        tool_choice=None if budget_exhausted else self._tool_choice,
+                        tool_choice=None if budget_exhausted or not tools_enabled else self._tool_choice,
                     ),
                     timeout=120,
                 )
@@ -360,7 +368,7 @@ class BaseAgent(ABC):
         )
 
         # 3.循环遍历直到最大迭代次数
-        for _ in range(self._agent_config.max_iterations):
+        for iteration in range(self._agent_config.max_iterations):
             # 4.如果LLM响应为空或无工具调用则表示LLM生成了文本回答，这时候就是最终答案
             if not message or not message.get("tool_calls"):
                 break
@@ -373,6 +381,7 @@ class BaseAgent(ABC):
 
                 if await self._tool_budget_exhausted():
                     yield ErrorEvent(
+                        stop_reason=RunStopReason.BUDGET_EXHAUSTED,
                         error=(
                             "本轮任务工具调用已达到上限"
                             f"({self._agent_config.max_tool_calls_per_run})，"
@@ -420,10 +429,31 @@ class BaseAgent(ABC):
                 })
 
             # 12.所有工具都执行完成后，调用LLM获取汇总消息二次提供
-            message = await self._invoke_llm(tool_messages)
-        else:
-            # 13.超过最大迭代次数后，则抛出错误
-            yield ErrorEvent(error=f"Agent迭代超过最大迭代次数: {self._agent_config.max_iterations}, 任务处理失败")
+            # 首次请求和工具响应后的请求必须保持同一种输出格式，
+            # 否则ReAct在执行工具后会丢失原本的JSON模式约束。
+            if iteration == self._agent_config.max_iterations - 1:
+                # 最后一轮工具已经执行，仍需把结果交给模型形成最终回复。
+                # 本次只允许整理已有结果，不再提供工具，避免生成下一轮
+                # 无法执行的调用。部分完成应据实说明，不能为了收尾虚构成功。
+                tool_messages.append({
+                    "role": "user",
+                    "content": (
+                        "当前步骤已达到工具迭代上限。请停止操作，按当前要求的返回格式"
+                        "整理已有结果，明确未完成或未核实的部分；"
+                        "若返回格式包含success，只有达到步骤目标时才设为true。"
+                        "不要再调用工具，也不要声称执行了尚未完成的操作。"
+                    ),
+                })
+                message = await self._invoke_llm(tool_messages, format, tools_enabled=False)
+            else:
+                message = await self._invoke_llm(tool_messages, format)
+
+        # 13.循环自然结束不等于失败：最后一次请求可能已返回有效答案。
+        # 仅在模型无视禁用工具约束时终止，不能执行超出迭代上限的调用，
+        # 也不能把带有未执行tool_calls的回复当作最终结果。
+        if message and message.get("tool_calls"):
+            yield ErrorEvent(error="已达到Agent迭代上限，但模型仍请求调用工具，未能生成收尾结果")
+            return
 
         # 14.在指定步骤内完成了迭代则返回消息事件
         if message and message.get("content") is not None:

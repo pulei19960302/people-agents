@@ -10,6 +10,8 @@ from fastapi import UploadFile
 from pydantic import TypeAdapter
 
 from app.domain.external.browser import Browser
+from app.domain.exceptions import RunBudgetExceeded
+from app.domain.models.plan import ExecutionStatus
 from app.domain.external.file_storage import FileStorage
 from app.domain.external.json_parser import JSONParser
 from app.domain.external.llm import LLM
@@ -44,6 +46,7 @@ from app.domain.models.run_checkpoint import (
     PendingToolCall,
     RunCheckpoint,
     RunCheckpointPhase,
+    RunStopReason,
 )
 from app.domain.models.session_event import SessionEvent
 from app.domain.models.search import SearchResults
@@ -133,6 +136,7 @@ class AgentTaskRunner(TaskRunner):
         checkpoint.last_event_id = event.id
 
         if isinstance(event, PlanEvent):
+            checkpoint.stop_reason = None
             checkpoint.plan_event_id = event.id
             checkpoint.current_step = None
             checkpoint.pending_tool_call = None
@@ -155,9 +159,15 @@ class AgentTaskRunner(TaskRunner):
         elif isinstance(event, StepEvent):
             checkpoint.current_step = event.step.model_copy(deep=True)
             if event.status == StepEventStatus.STARTED:
+                checkpoint.stop_reason = None
                 checkpoint.flow_status = RunCheckpointPhase.EXECUTING
                 if self._checkpoint.flow_status == RunCheckpointPhase.WAITING:
                     checkpoint.pending_tool_call = None
+            elif event.status == StepEventStatus.FAILED:
+                # 执行异常不证明方案不可行。保留失败快照用于展示，恢复时
+                # 重新激活同一个Step，不新增补救步骤。后续ErrorEvent补充原因。
+                checkpoint.flow_status = RunCheckpointPhase.EXECUTING
+                checkpoint.stop_reason = RunStopReason.EXECUTION_ERROR
             elif event.step.success:
                 # 成功步骤不再经过Planner.update_plan()。恢复时先进入
                 # EXECUTING，Flow会从已恢复的Plan中选择下一个未完成步骤；
@@ -189,6 +199,7 @@ class AgentTaskRunner(TaskRunner):
                 checkpoint.pending_tool_call = None
 
         elif isinstance(event, WaitEvent):
+            checkpoint.stop_reason = None
             checkpoint.flow_status = RunCheckpointPhase.WAITING
             if (
                 event.tool_call_id is not None
@@ -203,11 +214,30 @@ class AgentTaskRunner(TaskRunner):
                 )
 
         elif isinstance(event, DoneEvent):
+            checkpoint.stop_reason = None
             checkpoint.flow_status = RunCheckpointPhase.COMPLETED
             checkpoint.current_step = None
             checkpoint.pending_tool_call = None
 
-        elif not isinstance(event, ErrorEvent):
+        elif isinstance(event, ErrorEvent):
+            checkpoint.stop_reason = event.stop_reason
+            # 一般异常保持当前阶段：创建/更新计划失败仍恢复Planner，
+            # 总结失败仍恢复总结，不统一改成EXECUTING或UPDATING。
+            # 额度耗尽造成的部分结果不能触发无额度的重新规划。
+            if (
+                event.stop_reason == RunStopReason.BUDGET_EXHAUSTED
+                and checkpoint.current_step is not None
+                and not checkpoint.current_step.success
+            ):
+                checkpoint.flow_status = RunCheckpointPhase.EXECUTING
+            if (
+                checkpoint.flow_status == RunCheckpointPhase.EXECUTING
+                and checkpoint.current_step is not None
+                and not checkpoint.current_step.done
+            ):
+                checkpoint.current_step.status = ExecutionStatus.FAILED
+                checkpoint.current_step.error = event.error
+        else:
             return None
 
         self._checkpoint = checkpoint
@@ -612,6 +642,11 @@ class AgentTaskRunner(TaskRunner):
                 self._run_id,
             )
             async with self._uow:
+                self._checkpoint.stop_reason = RunStopReason.INTERRUPTED
+                await self._uow.session_run.update_checkpoint(
+                    run_id=self._run_id,
+                    checkpoint=self._checkpoint,
+                )
                 await self._uow.session_run.update_status(
                     self._run_id,
                     SessionRunStatus.INTERRUPTED
@@ -620,7 +655,12 @@ class AgentTaskRunner(TaskRunner):
         except Exception as e:
             # ErrorEvent会与FAILED状态在同一事务中持久化。
             logger.exception(f"AgentTaskRunner运行出错: {str(e)}")
-            await self._put_and_add_event(task, ErrorEvent(error=f"AgentTaskRunner出错: {str(e)}"))
+            await self._put_and_add_event(task, ErrorEvent(
+                error=f"AgentTaskRunner出错: {str(e)}",
+                stop_reason=(RunStopReason.BUDGET_EXHAUSTED
+                             if isinstance(e, RunBudgetExceeded)
+                             else RunStopReason.EXECUTION_ERROR),
+            ))
         finally:
             # 在同一个asyncio Task上下文中清理MCP/A2A工具资源
             # 这是关键：streamable_http_client内部使用anyio.create_task_group()，

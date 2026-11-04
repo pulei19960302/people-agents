@@ -29,6 +29,10 @@ EXECUTION_PROMPT = """
 返回格式要求：
 - 必须返回符合以下 TypeScript 接口定义的 JSON 格式。
 - 必须包含所有指定的必填字段。
+- 只返回 success、result、attachments 三个字段，不添加 status 等执行状态字段，也不使用 Markdown 代码围栏。
+- success只判断当前步骤的必要目标是否达成，不以整轮任务是否完成来判断。
+- 已达到当前步骤明确的必要完成条件时success=true；步骤允许缺失的可选项只需注明限制，不应单独导致失败。
+- 因额度耗尽、访问受阻等原因停止尝试，不等于达成目标；必要目标仍未完成或关键证据无法核实时success=false，已有结果和未完成原因写入result。
 
 TypeScript 接口定义：
 ```typescript

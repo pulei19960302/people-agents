@@ -10,10 +10,18 @@ class RunCheckpointPhase(str, Enum):
 
     PLANNING = "planning" # 正在根据用户问题创建 Plan
     EXECUTING = "executing" # 表示 ReAct 正在执行 Plan 中某一个 Step
-    UPDATING = "updating" # 当前 Step 已经执行完成或失败，接下来应该交给 Planner 更新 Plan
+    UPDATING = "updating" # 当前Step正常返回了未达成目标的业务结果，需要Planner调整方案
     SUMMARIZING = "summarizing" # 表示所有 Step 都已经执行完成，ReAct 正在生成最终回答
     WAITING = "waiting" # 等待用户回答
     COMPLETED = "completed" # 完成
+
+
+class RunStopReason(str, Enum):
+    """停止原因与恢复位置分开保存，不通过错误文案推断流程阶段。"""
+
+    EXECUTION_ERROR = "execution_error"
+    INTERRUPTED = "interrupted"
+    BUDGET_EXHAUSTED = "budget_exhausted"
 
 
 class PendingToolCall(BaseModel):
@@ -38,6 +46,8 @@ class RunCheckpoint(BaseModel):
     current_step: Step | None = None
     pending_tool_call: PendingToolCall | None = None
     last_event_id: str | None = None
+    # 旧checkpoint没有该字段仍能读取；恢复位置继续以flow_status为准。
+    stop_reason: RunStopReason | None = None
 
     @property
     def current_step_id(self) -> str | None:

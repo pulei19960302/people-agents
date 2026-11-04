@@ -20,7 +20,7 @@ class AgentConfig(BaseModel):
     """Agent通用配置"""
     max_iterations: int = Field(default=20, gt=0, lt=1000)  # 单次Agent调用最大迭代次数
     max_plan_steps: int = Field(default=5, gt=0, le=100)  # 整轮任务计划的最大步骤数
-    max_tool_calls_per_run: int = Field(default=12, gt=0, le=500)  # 跨步骤及恢复的Run级工具调用上限
+    max_tool_calls_per_run: int = Field(default=36, gt=0, le=500)  # 跨步骤及恢复的Run级工具调用上限
     max_retries: int = Field(default=3, gt=1, lt=10)  # 最大重试次数
     max_search_results: int = Field(default=10, gt=1, lt=30)  # 最大搜索结果条数
 
